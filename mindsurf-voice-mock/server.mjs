@@ -1,0 +1,635 @@
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { WebSocket, WebSocketServer } from "ws";
+
+const port = Number.parseInt(process.env.PORT ?? "8000", 10);
+const path = "/v1/voice/ws";
+const subprotocol = "mindsurf.voice.v1";
+const outputSampleRate = 24_000;
+const outputChunkDurationMs = 80;
+const outputSendIntervalMs = 40;
+const outputChunkBytes = (outputSampleRate * outputChunkDurationMs * 2) / 1_000;
+const mockPcm = loadMockAudio();
+
+const server = new WebSocketServer({
+  host: "127.0.0.1",
+  port,
+  path,
+  handleProtocols(protocols) {
+    return protocols.has(subprotocol) ? subprotocol : false;
+  },
+});
+
+server.on("connection", (socket) => {
+  console.log("Client connected.");
+  const state = {
+    handshaken: false,
+    lastPongNonce: null,
+    request: null,
+  };
+
+  const heartbeat = setInterval(() => {
+    if (!state.handshaken || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const nonce = randomUUID();
+    state.lastPongNonce = null;
+    send(socket, "session.ping", null, { nonce });
+
+    setTimeout(() => {
+      if (
+        socket.readyState === WebSocket.OPEN &&
+        state.lastPongNonce !== nonce
+      ) {
+        socket.close(1_001, "heartbeat timeout");
+      }
+    }, 10_000);
+  }, 15_000);
+
+  socket.on("message", (data, isBinary) => {
+    try {
+      if (isBinary) {
+        handleAudioFrame(socket, state, data);
+      } else {
+        handleControlMessage(socket, state, data.toString("utf8"));
+      }
+    } catch (error) {
+      sendError(
+        socket,
+        state.request?.id ?? null,
+        "internal_error",
+        error instanceof Error ? error.message : "mock server error",
+        true,
+      );
+    }
+  });
+
+  socket.on("close", () => {
+    clearInterval(heartbeat);
+  });
+});
+
+server.on("listening", () => {
+  console.log(`MindSurf mock listening on ws://127.0.0.1:${port}${path}`);
+});
+
+function handleControlMessage(socket, state, raw) {
+  let message;
+  try {
+    message = JSON.parse(raw);
+  } catch {
+    sendError(socket, null, "invalid_json", "JSON 解析失败", false);
+    return;
+  }
+
+  if (!state.handshaken) {
+    if (message.type !== "client.hello") {
+      sendError(socket, null, "handshake_required", "需要先握手", true);
+      socket.close(4_001, "handshake required");
+      return;
+    }
+
+    state.handshaken = true;
+    console.log("Protocol handshake completed.");
+    send(socket, "server.hello", null, createServerHello());
+    return;
+  }
+
+  switch (message.type) {
+    case "session.pong":
+      state.lastPongNonce = message.payload?.nonce ?? null;
+      break;
+    case "request.start":
+      startRequest(socket, state, message);
+      break;
+    case "input.commit":
+      commitInput(socket, state, message);
+      break;
+    case "request.cancel":
+      cancelRequest(socket, state, message);
+      break;
+    case "error":
+      break;
+    default:
+      sendError(
+        socket,
+        message.request_id ?? null,
+        "unsupported_message_type",
+        `不支持消息类型 ${message.type}`,
+        false,
+      );
+  }
+}
+
+function startRequest(socket, state, message) {
+  if (state.request) {
+    sendError(
+      socket,
+      message.request_id,
+      "request_already_active",
+      "已有活跃请求",
+      true,
+    );
+    return;
+  }
+
+  const mode = message.payload?.mode;
+  const selection = message.payload?.selection ?? {};
+  const wantsText = message.payload?.response?.text === true;
+  const wantsAudio = message.payload?.response?.audio === true;
+  if (mode !== "dictation" && mode !== "assistant") {
+    sendError(socket, message.request_id, "invalid_request", "请求模式无效", false);
+    return;
+  }
+  if (
+    selection.asr !== "asr-mock" ||
+    (mode === "assistant" && selection.llm !== "llm-mock") ||
+    (mode === "assistant" &&
+      wantsAudio &&
+      (selection.tts !== "tts-mock" ||
+        selection.output_audio !== "pcm16-24k-mono")) ||
+    (mode === "assistant" &&
+      !wantsAudio &&
+      (selection.tts !== null || selection.output_audio !== null)) ||
+    (mode === "dictation" &&
+      (selection.llm !== null ||
+        selection.tts !== null ||
+        selection.output_audio !== null))
+  ) {
+    sendError(
+      socket,
+      message.request_id,
+      "unsupported_inference_option",
+      "请求的推理候选不可用",
+      false,
+    );
+    return;
+  }
+  if (wantsText !== (mode === "assistant")) {
+    sendError(
+      socket,
+      message.request_id,
+      "invalid_request",
+      "文本回复配置与请求模式不一致",
+      false,
+    );
+    return;
+  }
+  if (mode === "dictation" && wantsAudio) {
+    sendError(
+      socket,
+      message.request_id,
+      "invalid_request",
+      "语音回复配置与请求模式不一致",
+      false,
+    );
+    return;
+  }
+
+  state.request = {
+    id: message.request_id,
+    frameCount: 0,
+    lastSequence: -1,
+    revision: -1,
+    sampleCount: 0,
+    mode,
+    wantsAudio,
+    wantsText,
+  };
+
+  send(socket, "request.accepted", message.request_id, {
+    mode,
+    language: message.payload?.language ?? "zh-CN",
+    selection: {
+      asr: "asr-mock",
+      llm: mode === "assistant" ? "llm-mock" : null,
+      tts: wantsAudio ? "tts-mock" : null,
+      output_audio: wantsAudio ? "pcm16-24k-mono" : null,
+    },
+    voice: "default",
+    max_recording_ms: 60_000,
+  });
+  console.log(`Request accepted (${mode}).`);
+}
+
+function handleAudioFrame(socket, state, data) {
+  if (!state.request) {
+    sendError(socket, null, "request_not_found", "没有活跃请求", false);
+    return;
+  }
+
+  const frame = Buffer.from(data);
+  if (frame.length < 48 || frame.toString("ascii", 0, 4) !== "MSVA") {
+    sendError(
+      socket,
+      state.request.id,
+      "invalid_audio_frame",
+      "音频帧头无效",
+      true,
+    );
+    state.request = null;
+    return;
+  }
+
+  const version = frame.readUInt8(4);
+  const kind = frame.readUInt8(5);
+  const headerLength = frame.readUInt16BE(8);
+  const sequence = frame.readUInt32BE(12);
+  const payloadLength = frame.readUInt32BE(24);
+  const requestId = bytesToUuid(frame.subarray(32, 48));
+
+  if (
+    version !== 1 ||
+    kind !== 1 ||
+    headerLength !== 48 ||
+    frame.length !== headerLength + payloadLength ||
+    requestId !== state.request.id ||
+    sequence !== state.request.lastSequence + 1 ||
+    payloadLength === 0 ||
+    payloadLength % 2 !== 0
+  ) {
+    sendError(
+      socket,
+      state.request.id,
+      "invalid_audio_frame",
+      "音频帧字段或序号无效",
+      true,
+    );
+    state.request = null;
+    return;
+  }
+
+  state.request.lastSequence = sequence;
+  state.request.frameCount += 1;
+  state.request.sampleCount += payloadLength / 2;
+
+  if (state.request.frameCount % 25 === 0) {
+    state.request.revision += 1;
+    const seconds = (state.request.sampleCount / 16_000).toFixed(1);
+    send(socket, "asr.partial", state.request.id, {
+      text: `正在识别，本地 Mock 已接收 ${seconds} 秒音频…`,
+      revision: state.request.revision,
+      stable_prefix_length: 4,
+    });
+  }
+}
+
+function commitInput(socket, state, message) {
+  const request = state.request;
+  if (!request || request.id !== message.request_id) {
+    sendError(
+      socket,
+      message.request_id,
+      "request_not_found",
+      "请求不存在",
+      false,
+    );
+    return;
+  }
+
+  const payload = message.payload ?? {};
+  const matches =
+    payload.last_sequence ===
+      (request.frameCount > 0 ? request.lastSequence : null) &&
+    payload.frame_count === request.frameCount &&
+    payload.sample_count === request.sampleCount;
+
+  if (!matches) {
+    sendError(
+      socket,
+      request.id,
+      "audio_commit_mismatch",
+      "提交统计与音频帧不一致",
+      true,
+    );
+    state.request = null;
+    return;
+  }
+
+  send(socket, "input.committed", request.id, {
+    accepted_duration_ms: Math.round(
+      (request.sampleCount / 16_000) * 1_000,
+    ),
+  });
+  console.log(`Input committed (${request.frameCount} frames).`);
+
+  const requestId = request.id;
+  const durationMs = Math.round((request.sampleCount / 16_000) * 1_000);
+  setTimeout(() => {
+    if (state.request?.id !== requestId) {
+      return;
+    }
+    send(socket, "asr.final", requestId, {
+      text: "这是来自本地 Mock 服务的识别结果。",
+      language: "zh-CN",
+      confidence: 0.99,
+      duration_ms: durationMs,
+    });
+  }, 250);
+
+  if (request.mode === "assistant") {
+    const deltas = ["这是", "来自本地 Mock 服务的", "流式助手回复。"];
+    deltas.forEach((delta, sequence) => {
+      setTimeout(
+        () => {
+          if (state.request?.id !== requestId) {
+            return;
+          }
+          send(socket, "assistant.text.delta", requestId, {
+            sequence,
+            delta,
+          });
+        },
+        350 + sequence * 80,
+      );
+    });
+
+    setTimeout(() => {
+      if (state.request?.id !== requestId) {
+        return;
+      }
+      send(socket, "assistant.text.done", requestId, {
+        text: deltas.join(""),
+        last_sequence: deltas.length - 1,
+        finish_reason: "stop",
+        usage: {
+          input_tokens: 12,
+          output_tokens: 18,
+        },
+      });
+    }, 350 + deltas.length * 80);
+
+    if (request.wantsAudio) {
+      setTimeout(() => {
+        if (state.request?.id !== requestId) {
+          return;
+        }
+        streamMockAudio(socket, state, requestId, durationMs);
+      }, 430);
+    } else {
+      setTimeout(() => {
+        if (state.request?.id !== requestId) {
+          return;
+        }
+        send(socket, "request.done", requestId, {
+          result: "success",
+          timing_ms: {
+            input_duration: durationMs,
+            asr_final_after_commit: 250,
+            llm_first_token_after_commit: 350,
+            server_total_after_commit: 650,
+          },
+        });
+        state.request = null;
+      }, 650);
+    }
+    return;
+  }
+
+  setTimeout(() => {
+    if (state.request?.id !== requestId) {
+      return;
+    }
+    send(socket, "request.done", requestId, {
+      result: "success",
+      timing_ms: {
+        input_duration: durationMs,
+        asr_final_after_commit: 250,
+        server_total_after_commit: 300,
+      },
+    });
+    state.request = null;
+  }, 300);
+}
+
+function cancelRequest(socket, state, message) {
+  if (state.request?.id === message.request_id) {
+    state.request = null;
+  }
+  send(socket, "request.cancelled", message.request_id, {
+    reason: message.payload?.reason ?? "user_cancelled",
+  });
+  console.log("Request cancelled.");
+}
+
+function createServerHello() {
+  return {
+    session_id: randomUUID(),
+    protocol_version: 1,
+    pipeline: "cascade",
+    limits: {
+      max_recording_ms: 60_000,
+      max_json_bytes: 65_536,
+      max_binary_bytes: 65_536,
+    },
+    features: {
+      streaming_asr: true,
+      streaming_text: true,
+      streaming_audio: true,
+      cancellation: true,
+    },
+    inference_options: {
+      defaults: {
+        asr: "asr-mock",
+        llm: "llm-mock",
+        tts: "tts-mock",
+        output_audio: "pcm16-24k-mono",
+      },
+      asr: [
+        {
+          id: "asr-mock",
+          name: "Mock ASR",
+          description: "Deterministic local protocol test recognizer",
+        },
+      ],
+      llm: [
+        {
+          id: "llm-mock",
+          name: "Mock LLM",
+          description: "Deterministic streaming text generator",
+        },
+      ],
+      tts: [
+        {
+          id: "tts-mock",
+          name: "Mock TTS",
+          description: "Placeholder for capability negotiation",
+        },
+      ],
+      output_audio: [
+        {
+          id: "pcm16-24k-mono",
+          name: "PCM 24 kHz Mono",
+          description: "Mock output audio capability",
+          encoding: "pcm_s16le",
+          sample_rate: 24_000,
+          channels: 1,
+        },
+      ],
+    },
+    heartbeat: {
+      interval_ms: 15_000,
+      timeout_ms: 10_000,
+    },
+  };
+}
+
+function streamMockAudio(socket, state, requestId, inputDurationMs) {
+  send(socket, "output.audio.start", requestId, {
+    encoding: "pcm_s16le",
+    sample_rate: outputSampleRate,
+    channels: 1,
+    voice: "mock_audio",
+  });
+
+  const chunkCount = Math.ceil(mockPcm.length / outputChunkBytes);
+  let sequence = 0;
+  const sendNext = () => {
+    if (
+      state.request?.id !== requestId ||
+      socket.readyState !== WebSocket.OPEN
+    ) {
+      return;
+    }
+    const start = sequence * outputChunkBytes;
+    const end = Math.min(start + outputChunkBytes, mockPcm.length);
+    socket.send(
+      createOutputAudioFrame(
+        requestId,
+        sequence,
+        sequence * outputChunkDurationMs * 1_000,
+        mockPcm.subarray(start, end),
+      ),
+    );
+    sequence += 1;
+
+    if (sequence < chunkCount) {
+      setTimeout(sendNext, outputSendIntervalMs);
+      return;
+    }
+
+    const sampleCount = mockPcm.length / 2;
+    const durationMs = Math.round((sampleCount / outputSampleRate) * 1_000);
+    send(socket, "output.audio.done", requestId, {
+      last_sequence: chunkCount - 1,
+      chunk_count: chunkCount,
+      sample_count: sampleCount,
+      duration_ms: durationMs,
+    });
+    send(socket, "request.done", requestId, {
+      result: "success",
+      timing_ms: {
+        input_duration: inputDurationMs,
+        asr_final_after_commit: 250,
+        llm_first_token_after_commit: 350,
+        audio_first_chunk_after_commit: 430,
+        server_total_after_commit:
+          430 + (chunkCount - 1) * outputSendIntervalMs,
+      },
+    });
+    state.request = null;
+  };
+
+  sendNext();
+}
+
+function createOutputAudioFrame(requestId, sequence, timestampUs, pcm) {
+  const frame = Buffer.alloc(48 + pcm.length);
+  frame.write("MSVA", 0, "ascii");
+  frame.writeUInt8(1, 4);
+  frame.writeUInt8(2, 5);
+  frame.writeUInt16BE(48, 8);
+  frame.writeUInt32BE(sequence, 12);
+  frame.writeBigUInt64BE(BigInt(timestampUs), 16);
+  frame.writeUInt32BE(pcm.length, 24);
+  Buffer.from(requestId.replaceAll("-", ""), "hex").copy(frame, 32);
+  pcm.copy(frame, 48);
+  return frame;
+}
+
+function loadMockAudio() {
+  const audioPath = join(dirname(fileURLToPath(import.meta.url)), "mock_audio.m4a");
+  const result = spawnSync(
+    "ffmpeg",
+    [
+      "-v",
+      "error",
+      "-i",
+      audioPath,
+      "-f",
+      "s16le",
+      "-acodec",
+      "pcm_s16le",
+      "-ac",
+      "1",
+      "-ar",
+      String(outputSampleRate),
+      "pipe:1",
+    ],
+    { encoding: null, maxBuffer: 16 * 1_024 * 1_024 },
+  );
+  if (result.error || result.status !== 0 || !result.stdout?.length) {
+    const detail = result.stderr?.toString("utf8").trim();
+    throw new Error(
+      `无法解码 mock_audio.m4a，请确认 ffmpeg 可用${detail ? `：${detail}` : ""}`,
+    );
+  }
+  if (result.stdout.length % 2 !== 0) {
+    throw new Error("mock_audio.m4a 解码后的 PCM 长度无效");
+  }
+  console.log(
+    `Loaded mock_audio.m4a (${(result.stdout.length / 2 / outputSampleRate).toFixed(2)} s).`,
+  );
+  return result.stdout;
+}
+
+function send(socket, type, requestId, payload) {
+  if (socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  socket.send(
+    JSON.stringify({
+      v: 1,
+      type,
+      event_id: randomUUID(),
+      request_id: requestId,
+      sent_at_ms: Date.now(),
+      payload,
+    }),
+  );
+}
+
+function sendError(socket, requestId, code, message, fatal) {
+  send(socket, "error", requestId, {
+    code,
+    message,
+    stage: requestId ? "input" : "protocol",
+    recoverable: !fatal,
+    fatal,
+    details: {},
+  });
+}
+
+function bytesToUuid(bytes) {
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join("-");
+}
+
+function shutdown() {
+  server.close(() => process.exit(0));
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
