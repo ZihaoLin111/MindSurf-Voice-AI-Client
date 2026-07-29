@@ -55,18 +55,17 @@
 ## 5. 客户端待实现
 
 - 完善鉴权、`wss://` 和生产环境配置。
-- 完成客户端长时间运行、资源占用和多轮请求测试。
-- 完成安装包、版本升级、签名及发布验证。
 - 继续优化界面、悬浮窗和快捷键交互。
 - 按需求进行macOS、Linux的跨平台适配。
 - 接入正式服务地址，替换本地 Mock。
+- 完成安装包、版本升级、签名及发布验证。
 
 ## 6. 交付内容
 
 ```text
 mindsurf-voice-ai/       		Windows Tauri 客户端源码
 mindsurf-voice-mock/     		客户端联调用 WebSocket Mock
-docs/README.md                	项目启动说明
+README.md                		项目启动说明
 docs/WS_PROTOCOL.md           	WebSocket 协议
 docs/PHASE1_IMPLEMENTATION.md 	Phase 1 实现基线
 ```
