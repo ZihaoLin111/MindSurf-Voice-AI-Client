@@ -22,6 +22,46 @@ export interface RecordingResult {
   wavBytes: Uint8Array;
 }
 
+export async function prepareMicrophone() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("media_devices_unavailable");
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: true,
+    video: false,
+  });
+  for (const track of stream.getTracks()) {
+    track.stop();
+  }
+}
+
+export function describeRecorderError(
+  error: unknown,
+  context: { nativePermissionGranted?: boolean } = {},
+) {
+  if (error instanceof DOMException) {
+    if (error.name === "NotAllowedError") {
+      if (context.nativePermissionGranted) {
+        return "macOS 已允许麦克风，但 WebView 无法取得音频流，请重启应用后重试。";
+      }
+      return "麦克风权限被拒绝，请在系统设置中允许访问后重试。";
+    }
+    if (error.name === "NotFoundError") {
+      return "没有找到可用的麦克风设备。";
+    }
+    if (error.name === "NotReadableError") {
+      return "麦克风正被其他应用占用，或设备暂时不可用。";
+    }
+  }
+
+  if (error instanceof Error && error.message === "media_devices_unavailable") {
+    return "当前运行环境不支持麦克风采集。";
+  }
+
+  return "录音初始化失败，请检查麦克风和系统权限后重试。";
+}
+
 export class MicrophoneRecorder {
   private acceptingAudio = false;
   private audioContext: AudioContext | null = null;
@@ -40,19 +80,41 @@ export class MicrophoneRecorder {
     return this.acceptingAudio;
   }
 
-  async start(callbacks: RecorderCallbacks = {}) {
+  get isPrepared() {
+    return Boolean(
+      this.stream &&
+      this.stream.getTracks().some((track) => track.readyState === "live") &&
+      this.audioContext &&
+      this.audioContext.state !== "closed" &&
+      this.source &&
+      this.processor &&
+      this.silentOutput &&
+      this.resampler,
+    );
+  }
+
+  async prepare() {
     if (this.acceptingAudio) {
       throw new Error("recording_already_active");
+    }
+    if (this.isPrepared) {
+      return;
     }
 
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("media_devices_unavailable");
     }
 
-    this.resetSession();
-    this.callbacks = callbacks;
-
     try {
+      if (
+        this.stream ||
+        this.audioContext ||
+        this.source ||
+        this.processor ||
+        this.silentOutput
+      ) {
+        await this.cleanup();
+      }
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: { ideal: 1 },
@@ -94,11 +156,27 @@ export class MicrophoneRecorder {
       if (this.audioContext.state === "suspended") {
         await this.audioContext.resume();
       }
-      this.acceptingAudio = true;
     } catch (error) {
       await this.cleanup();
       throw error;
     }
+  }
+
+  async start(callbacks: RecorderCallbacks = {}) {
+    if (this.acceptingAudio) {
+      throw new Error("recording_already_active");
+    }
+    if (!this.isPrepared) {
+      await this.prepare();
+    }
+
+    this.resetSession();
+    this.resampler = new StreamingLinearResampler(
+      this.audioContext!.sampleRate,
+      TARGET_SAMPLE_RATE,
+    );
+    this.callbacks = callbacks;
+    this.acceptingAudio = true;
   }
 
   async stop(): Promise<RecordingResult> {
@@ -117,6 +195,7 @@ export class MicrophoneRecorder {
     const wavBytes = createPcm16Wav(this.pcmChunks);
     const liveTracksAfterCleanup = await this.cleanup();
     this.callbacks.onLevel?.(0);
+    this.callbacks = {};
 
     return {
       durationMs: (this.totalSamples / TARGET_SAMPLE_RATE) * 1_000,
@@ -135,6 +214,14 @@ export class MicrophoneRecorder {
     this.resetSession();
     this.callbacks.onLevel?.(0);
     this.callbacks.onDuration?.(0);
+    this.callbacks = {};
+  }
+
+  async dispose() {
+    this.acceptingAudio = false;
+    this.resetSession();
+    this.callbacks = {};
+    await this.cleanup();
   }
 
   private handleAudioChunk(input: Float32Array) {

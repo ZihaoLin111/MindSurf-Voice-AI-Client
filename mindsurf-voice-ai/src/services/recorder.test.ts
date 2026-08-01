@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MicrophoneRecorder } from "./recorder";
+import {
+  describeRecorderError,
+  MicrophoneRecorder,
+  prepareMicrophone,
+} from "./recorder";
 
 class FakeTrack {
   readyState: MediaStreamTrackState = "live";
@@ -66,15 +70,62 @@ afterEach(() => {
 });
 
 describe("MicrophoneRecorder cleanup", () => {
-  it("releases every MediaStream track over twenty recording cycles", async () => {
+  it("prepares microphone access and immediately releases every track", async () => {
+    const stream = new FakeStream();
+    const getUserMedia = vi.fn(async () => stream);
+    vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
+
+    await prepareMicrophone();
+
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true, video: false });
+    expect(stream.track.readyState).toBe("ended");
+  });
+
+  it("distinguishes native denial from a WebView capture failure", () => {
+    const error = new DOMException("not allowed", "NotAllowedError");
+
+    expect(describeRecorderError(error)).toContain("权限被拒绝");
+    expect(describeRecorderError(error, { nativePermissionGranted: true })).toContain(
+      "WebView 无法取得音频流",
+    );
+  });
+
+  it("prepares the audio pipeline before recording without opening a second stream", async () => {
+    const stream = new FakeStream();
+    const getUserMedia = vi.fn(async () => stream);
     vi.stubGlobal("document", { baseURI: "http://localhost/" });
     vi.stubGlobal("AudioContext", FakeAudioContext);
     vi.stubGlobal("AudioWorkletNode", FakeAudioWorkletNode);
-    vi.stubGlobal("navigator", {
-      mediaDevices: {
-        getUserMedia: vi.fn(async () => new FakeStream()),
-      },
+    vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
+
+    const recorder = new MicrophoneRecorder();
+    await recorder.prepare();
+
+    expect(recorder.isPrepared).toBe(true);
+    expect(recorder.isRecording).toBe(false);
+
+    await recorder.start();
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(recorder.isRecording).toBe(true);
+
+    await recorder.stop();
+    expect(recorder.isPrepared).toBe(false);
+
+    await recorder.dispose();
+    expect(recorder.isPrepared).toBe(false);
+  });
+
+  it("releases every stream between recording cycles", async () => {
+    vi.stubGlobal("document", { baseURI: "http://localhost/" });
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    vi.stubGlobal("AudioWorkletNode", FakeAudioWorkletNode);
+    const streams: FakeStream[] = [];
+    const getUserMedia = vi.fn(async () => {
+      const stream = new FakeStream();
+      streams.push(stream);
+      return stream;
     });
+    vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
 
     const recorder = new MicrophoneRecorder();
 
@@ -85,6 +136,12 @@ describe("MicrophoneRecorder cleanup", () => {
       const result = await recorder.stop();
       expect(result.liveTracksAfterCleanup).toBe(0);
       expect(recorder.isRecording).toBe(false);
+      expect(recorder.isPrepared).toBe(false);
     }
+
+    expect(getUserMedia).toHaveBeenCalledTimes(20);
+    expect(streams.every((stream) => stream.track.readyState === "ended")).toBe(true);
+    await recorder.dispose();
+    expect(recorder.isPrepared).toBe(false);
   });
 });

@@ -8,8 +8,13 @@ import {
   showOverlayWindow,
   subscribeOverlayActions,
 } from "../services/overlay";
-import { subscribeShortcutEvents } from "../services/shortcuts";
+import {
+  reportShortcutEventHandled,
+  subscribeShortcutEvents,
+} from "../services/shortcuts";
+import { prepareTextInjectionTarget } from "../services/textInjection";
 import { useVoiceSessionStore } from "../stores/voiceSession";
+import type { OverlaySnapshot } from "../types/overlay";
 import { VOICE_MODE_LABELS, type VoiceInteractionMode } from "../types/voice";
 import AudioMeter from "./AudioMeter.vue";
 
@@ -21,8 +26,11 @@ let shortcutHeld = false;
 let unlistenShortcuts: (() => void) | null = null;
 let unlistenOverlay: (() => void) | null = null;
 let overlayPublishTimer: ReturnType<typeof globalThis.setInterval> | null = null;
+let overlayPublishInFlight = false;
+let pendingOverlaySnapshot: OverlaySnapshot | null = null;
 let overlayHideTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
 let overlayShown = false;
+let recordingAttempt = 0;
 
 const canStart = computed(
   () =>
@@ -75,6 +83,7 @@ const stateLabel = computed(() => {
   return {
     idle: "准备录音",
     requesting: "正在请求麦克风权限",
+    prepared: "麦克风已就绪，正在创建请求",
     recording: "正在录音",
     stopping: "正在处理音频",
     ready: "录音已完成",
@@ -125,13 +134,15 @@ const overlayActive = computed(
       playbackActive.value),
 );
 
-function createOverlaySnapshot() {
+function createOverlaySnapshot(): OverlaySnapshot {
   return {
     assistantText: assistantText.value,
     cancellable: recorder.isBusy.value || Boolean(session.state.activeRequestId),
     duration: formattedDuration.value,
+    durationMs: recorder.durationMs.value,
     level: recorder.level.value,
     mode: session.state.selectedMode,
+    recording: recorder.isRecording.value,
     status:
       session.state.requestStatus === "failed"
         ? "处理失败"
@@ -139,11 +150,36 @@ function createOverlaySnapshot() {
           ? playbackStatusLabel.value
           : stateLabel.value,
     transcript: transcript.value,
+    updatedAtMs: Date.now(),
   };
 }
 
 function publishCurrentOverlayState() {
-  void publishOverlaySnapshot(createOverlaySnapshot());
+  if (shortcutDisposed) {
+    return;
+  }
+  pendingOverlaySnapshot = createOverlaySnapshot();
+  void flushOverlaySnapshot();
+}
+
+async function flushOverlaySnapshot() {
+  if (overlayPublishInFlight) {
+    return;
+  }
+
+  overlayPublishInFlight = true;
+  try {
+    while (pendingOverlaySnapshot && !shortcutDisposed) {
+      const snapshot = pendingOverlaySnapshot;
+      pendingOverlaySnapshot = null;
+      await publishOverlaySnapshot(snapshot);
+    }
+  } finally {
+    overlayPublishInFlight = false;
+    if (pendingOverlaySnapshot && !shortcutDisposed) {
+      void flushOverlaySnapshot();
+    }
+  }
 }
 
 function clearOverlayHideTimer() {
@@ -183,10 +219,39 @@ function syncOverlayVisibility(active: boolean) {
   hideOverlayNow();
 }
 
-async function startNetworkRecording() {
+async function startNetworkRecording(
+  shouldContinue: () => boolean = () => true,
+  fromGlobalShortcut = false,
+) {
+  const attempt = ++recordingAttempt;
+  if (fromGlobalShortcut) {
+    if (session.state.overlayEnabled) {
+      overlayShown = true;
+      publishCurrentOverlayState();
+      await showOverlayWindow();
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 120));
+    }
+  }
+  const prepared = await recorder.prepareRecording();
+  if (!prepared || attempt !== recordingAttempt || !shouldContinue()) {
+    await recorder.cancelRecording();
+    return;
+  }
+
+  if (session.state.autoInjection[session.state.selectedMode]) {
+    await prepareTextInjectionTarget();
+  }
+
   try {
     await session.beginRequest();
   } catch {
+    await recorder.cancelRecording();
+    return;
+  }
+
+  if (attempt !== recordingAttempt || !shouldContinue()) {
+    await recorder.cancelRecording();
+    await session.cancelActiveRequest("user_cancelled");
     return;
   }
 
@@ -229,6 +294,7 @@ async function stopNetworkRecording() {
 }
 
 async function cancelNetworkRecording() {
+  recordingAttempt += 1;
   await recorder.cancelRecording();
   await session.cancelActiveRequest("user_cancelled");
 }
@@ -241,6 +307,12 @@ function enqueueShortcutAction(action: () => Promise<void>) {
 
 function handleShortcutPressed(timestampMs: number) {
   session.noteShortcutEvent(timestampMs);
+  void reportShortcutEventHandled({
+    phase: "pressed",
+    canStart: canStart.value,
+    recorderState: recorder.state.value,
+    requestStatus: session.state.requestStatus,
+  });
   if (shortcutHeld) {
     return;
   }
@@ -252,7 +324,7 @@ function handleShortcutPressed(timestampMs: number) {
     if (!canStart.value) {
       return;
     }
-    await startNetworkRecording();
+    await startNetworkRecording(() => shortcutHeld, true);
     if (!shortcutHeld && recorder.isRecording.value) {
       await stopNetworkRecording();
     }
@@ -261,6 +333,12 @@ function handleShortcutPressed(timestampMs: number) {
 
 function handleShortcutReleased(timestampMs: number) {
   session.noteShortcutEvent(timestampMs);
+  void reportShortcutEventHandled({
+    phase: "released",
+    canStart: canStart.value,
+    recorderState: recorder.state.value,
+    requestStatus: session.state.requestStatus,
+  });
   if (!shortcutHeld) {
     return;
   }
@@ -287,7 +365,7 @@ onMounted(() => {
     if (overlayShown) {
       publishCurrentOverlayState();
     }
-  }, 60);
+  }, 33);
   void subscribeOverlayActions({
     onCancel: () => {
       if (recorder.isBusy.value || session.state.activeRequestId) {
@@ -339,6 +417,7 @@ watch(
 
 onBeforeUnmount(() => {
   shortcutDisposed = true;
+  pendingOverlaySnapshot = null;
   shortcutHeld = false;
   clearOverlayHideTimer();
   if (overlayPublishTimer) {
@@ -404,7 +483,7 @@ onBeforeUnmount(() => {
               class="button button-primary"
               type="button"
               :disabled="!canStart"
-              @click="startNetworkRecording"
+              @click="startNetworkRecording()"
             >
               {{
                 session.state.connectionStatus !== "connected"

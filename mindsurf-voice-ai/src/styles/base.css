@@ -172,7 +172,7 @@ body {
   height: 100%;
   border-radius: inherit;
   background: var(--accent);
-  transition: width 60ms linear;
+  will-change: width;
 }
 
 .overlay-footer button {
@@ -1068,6 +1068,27 @@ h1 {
   display: flex;
   flex: none;
   gap: 6px;
+}
+
+.permission-initializer > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 10px;
+}
+
+.permission-initializer strong {
+  flex: 1 1 230px;
+}
+
+.permission-initializer strong[data-ready="true"] {
+  color: var(--success);
+}
+
+.permission-initializer small {
+  flex: 1 1 100%;
+  color: var(--text-muted);
+  font-size: 0.64rem;
 }
 
 .shortcut-status::before {

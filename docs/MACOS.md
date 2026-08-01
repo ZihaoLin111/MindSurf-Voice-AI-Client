@@ -8,15 +8,44 @@
 
 ## 权限
 
-| 权限 | 用途 | 触发位置 |
-|---|---|---|
-| 麦克风 | 录制语音 | 首次开始录音 |
-| 辅助功能 | 将 Unicode 文本输入当前前台应用 | 首次文本注入或设置页 |
-| 输入监控 | 在其他应用处于前台时监听按住说话和 Escape | 启用全局快捷键或设置页 |
+| 权限     | 用途                                                       | 触发位置                       |
+| -------- | ---------------------------------------------------------- | ------------------------------ |
+| 麦克风   | 录制语音                                                   | 权限页统一初始化或首次开始录音 |
+| 辅助功能 | 将 Unicode 文本输入当前前台应用                            | 首次文本注入或权限页           |
+| 输入监控 | 当前组合键快捷键方案不依赖该权限，也不把其状态作为就绪条件 | 非必需                         |
 
-权限被拒绝后，可在客户端“设置 → macOS 系统权限”中重新请求或直接打开
-对应的“隐私与安全性”页面。部分 macOS 版本在变更输入监控权限后会要求重启
-应用。
+启动时如有核心权限未授权或快捷键未就绪，客户端会默认进入“权限”页。点击
+“初始化系统权限”后，客户端会查询或请求麦克风和辅助功能权限，并验证快捷键
+监听器。macOS 没有提供可靠 API 判断应用是否明确列在输入监控设置中，因此
+客户端不会把 `CGPreflightListenEventAccess` 的结果显示成可信的授权状态。
+
+权限被拒绝后，可在同一页面重新请求或直接打开对应的“隐私与安全性”页面。
+从系统设置返回应用后，麦克风和辅助功能状态会自动刷新。
+
+全局快捷键的“用户期望启用”状态会单独持久化。用户主动关闭快捷键后，权限
+刷新或应用重启不会重新启用；如果用户期望启用但因权限不足启动失败，授权后
+会自动重新注册。
+
+macOS 正式录音使用原生 AVAudioRecorder，不依赖隐藏 WKWebView 的
+`getUserMedia()`。停止录音后读取单声道 PCM，必要时重采样到 16 kHz，再按现有
+20 ms 帧协议提交。停止或取消时会释放原生录音器并删除临时文件。
+
+macOS 文本注入会同时校验前台应用和 focused Accessibility 元素。同一应用内
+切换窗口、标签页或输入框时，注入会停止并保留剩余文本。悬浮窗优先跟随前台
+应用最前方窗口所在的显示器，无法读取窗口信息时再回退到应用当前显示器。
+
+每次文本注入任务只创建并复用一个 `CGEventSource`。悬浮窗选择目标显示器时，
+会先把 Tauri 的物理显示器边界转换为 Quartz 逻辑坐标，再使用目标显示器的
+scale factor 计算物理尺寸和边距；窗口最终通过逻辑坐标移动和调整大小，避免
+读取旧显示器缩放造成 Retina 与非 Retina 混合环境下的偏移。
+
+macOS 全局快捷键通过 `tauri-plugin-global-shortcut` 注册包含 Space 的组合键，
+原生回调通过独立线程派发应用事件。悬浮窗使用透明 NSPanel 作为 Space 载体，
+保留 Tauri 原 NSWindow/WebView 并作为子窗口，因此可显示在第三方全屏 Space，
+同时不会破坏 Tao 对原窗口 contentView 的内部假设。
+
+完整的问题现象、不可用旧方案和最终架构见
+[`MindSurf_macOS适配实现复盘.md`](MindSurf_macOS适配实现复盘.md)。
 
 ## 本地验证
 
@@ -33,12 +62,29 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 ```
 
+## CI 必需检查
+
+`.github/workflows/ci.yml` 会在每次 push 和 pull request 上运行以下检查：
+
+- `Windows quality gate`
+- `macOS quality gate`
+- `macOS application bundle`
+
+应在 GitHub 分支保护规则中将这三个检查设为 `main` 的必需状态检查。工作流
+代码可以保证检查被创建，但分支保护仍需仓库管理员在 GitHub 设置中启用。
+
 生成本机架构的测试应用包：
 
 ```bash
 cd mindsurf-voice-ai
-npm run tauri build -- --debug --bundles app
+npm run build:macos:debug
 ```
+
+不要使用 `tauri dev` 或未经 bundle 签名的裸二进制验证 TCC 权限。本地没有
+Apple Development 签名证书时，脚本会使用标识为 `org.sast.mindsurf` 的 ad-hoc
+签名；每次重新构建都会产生新的代码哈希，因此必须先完全退出旧进程，再执行
+`tccutil reset All org.sast.mindsurf`，重新打开同一个 `.app` 并授权。红色关闭按钮
+只会隐藏主窗口，必须使用托盘菜单“退出”或确认进程已经结束。
 
 生成 Universal App 与 DMG：
 
@@ -50,7 +96,9 @@ npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
 ## 签名与公证
 
 根目录 `.github/workflows/release-macos.yml` 会构建、签名、公证并创建草稿
-GitHub Release。仓库需要配置以下 Actions secrets：
+GitHub Release。tag 发布前会校验 tag、`tauri.conf.json`、`package.json` 和
+`Cargo.toml` 的版本一致；例如应用版本为 `0.1.0` 时只能使用 `v0.1.0` tag。
+仓库需要配置以下 Actions secrets：
 
 - `APPLE_CERTIFICATE`
 - `APPLE_CERTIFICATE_PASSWORD`
@@ -59,5 +107,7 @@ GitHub Release。仓库需要配置以下 Actions secrets：
 - `APPLE_PASSWORD`
 - `APPLE_TEAM_ID`
 
-发布前还应在常用编辑器、浏览器输入框、Terminal、多显示器和全屏 Space 中
-手工验证快捷键、中文/英文/emoji/换行注入、权限恢复、睡眠唤醒与服务重连。
+发布前还应在常用编辑器、浏览器输入框、Terminal、Retina + 非 Retina 多显示器
+和全屏 Space 中手工验证快捷键、权限恢复、睡眠唤醒与服务重连，并分别使用
+500、2000、8000 code point 的中文、英文、emoji 和换行混合文本验证注入性能、
+目标切换中止及剩余文本保留。

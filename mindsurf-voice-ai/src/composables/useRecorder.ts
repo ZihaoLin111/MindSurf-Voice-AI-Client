@@ -1,20 +1,33 @@
-import { computed, onBeforeUnmount, ref } from "vue";
+import { isTauri } from "@tauri-apps/api/core";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
-import { MicrophoneRecorder, type RecordingResult } from "../services/recorder";
-import { openMicrophonePermissionSettings } from "../services/permissions";
+import {
+  describeRecorderError,
+  MicrophoneRecorder,
+  type RecordingResult,
+} from "../services/recorder";
+import { NativeMicrophoneRecorder } from "../services/nativeRecorder";
+import {
+  getSystemPermissionStatus,
+  openMicrophonePermissionSettings,
+} from "../services/permissions";
 
 export type MicrophonePermissionState =
   "unknown" | "prompt" | "granted" | "denied" | "unsupported";
 
 export type RecorderState =
-  "idle" | "requesting" | "recording" | "stopping" | "ready" | "error";
+  "idle" | "requesting" | "prepared" | "recording" | "stopping" | "ready" | "error";
 
 export interface StartRecordingOptions {
   onAutoStop?: () => void;
   onFrame?: (frame: Int16Array, sequence: number) => void;
 }
 
-const recorder = new MicrophoneRecorder();
+const usesNativeRecorder =
+  isTauri() && /Macintosh|Mac OS X/.test(globalThis.navigator?.userAgent ?? "");
+const recorder = usesNativeRecorder
+  ? new NativeMicrophoneRecorder()
+  : new MicrophoneRecorder();
 const MAX_RECORDING_MS = 60_000;
 
 export function useRecorder() {
@@ -31,15 +44,45 @@ export function useRecorder() {
   const isBusy = computed(
     () =>
       state.value === "requesting" ||
+      state.value === "prepared" ||
       state.value === "recording" ||
       state.value === "stopping",
   );
   const isRecording = computed(() => state.value === "recording");
 
   async function refreshPermissionState() {
+    if (usesNativeRecorder) {
+      const nativeStatus = await getSystemPermissionStatus("microphone");
+      if (!nativeStatus.ok) {
+        permissionState.value = "unknown";
+        return;
+      }
+      permissionState.value =
+        nativeStatus.data.status === "granted"
+          ? "granted"
+          : ["denied", "restricted"].includes(nativeStatus.data.status)
+            ? "denied"
+            : nativeStatus.data.status === "not_determined"
+              ? "prompt"
+              : "unknown";
+      return;
+    }
+
     if (!navigator.mediaDevices?.getUserMedia) {
       permissionState.value = "unsupported";
       return;
+    }
+
+    const nativeStatus = await getSystemPermissionStatus("microphone");
+    if (nativeStatus.ok) {
+      if (["denied", "restricted"].includes(nativeStatus.data.status)) {
+        permissionState.value = "denied";
+        return;
+      }
+      if (nativeStatus.data.status === "not_determined") {
+        permissionState.value = "prompt";
+        return;
+      }
     }
 
     if (!navigator.permissions?.query) {
@@ -58,15 +101,14 @@ export function useRecorder() {
   }
 
   async function startRecording(options: StartRecordingOptions = {}) {
-    if (isBusy.value) {
+    if (state.value !== "prepared" && !(await prepareRecording())) {
       return false;
     }
 
     errorMessage.value = "";
     durationMs.value = 0;
     level.value = 0;
-    state.value = "requesting";
-    const currentOperationId = ++operationId;
+    const currentOperationId = operationId;
 
     try {
       await recorder.start({
@@ -95,11 +137,74 @@ export function useRecorder() {
       return true;
     } catch (error) {
       activeTrackCount.value = 0;
-      errorMessage.value = describeRecorderError(error);
-      permissionState.value =
-        error instanceof DOMException && error.name === "NotAllowedError"
-          ? "denied"
-          : permissionState.value;
+      if (error instanceof DOMException && error.name === "NotAllowedError") {
+        const nativeStatus = await getSystemPermissionStatus("microphone");
+        const nativePermissionGranted =
+          nativeStatus.ok && nativeStatus.data.status === "granted";
+        errorMessage.value = describeRecorderError(error, {
+          nativePermissionGranted,
+        });
+        permissionState.value = "denied";
+      } else {
+        errorMessage.value = describeRecorderError(error);
+      }
+      state.value = "error";
+      return false;
+    }
+  }
+
+  async function prepareRecording() {
+    if (state.value === "prepared") {
+      return true;
+    }
+    if (isBusy.value) {
+      return false;
+    }
+
+    errorMessage.value = "";
+    durationMs.value = 0;
+    level.value = 0;
+    state.value = "requesting";
+    const currentOperationId = ++operationId;
+
+    try {
+      await recorder.prepare();
+      if (usesNativeRecorder) {
+        await refreshPermissionState();
+      }
+      if (currentOperationId !== operationId) {
+        await recorder.cancel();
+        return false;
+      }
+      if (usesNativeRecorder && permissionState.value !== "granted") {
+        await recorder.cancel();
+        activeTrackCount.value = 0;
+        errorMessage.value =
+          permissionState.value === "denied"
+            ? "麦克风权限未授权，请在系统设置中允许访问后重试。"
+            : "请先在权限页面完成麦克风授权。";
+        state.value = "error";
+        return false;
+      }
+      activeTrackCount.value = usesNativeRecorder ? 0 : 1;
+      if (!usesNativeRecorder) {
+        permissionState.value = "granted";
+      }
+      state.value = "prepared";
+      return true;
+    } catch (error) {
+      activeTrackCount.value = 0;
+      if (error instanceof DOMException && error.name === "NotAllowedError") {
+        const nativeStatus = await getSystemPermissionStatus("microphone");
+        const nativePermissionGranted =
+          nativeStatus.ok && nativeStatus.data.status === "granted";
+        errorMessage.value = describeRecorderError(error, {
+          nativePermissionGranted,
+        });
+        permissionState.value = "denied";
+      } else {
+        errorMessage.value = describeRecorderError(error);
+      }
       state.value = "error";
       return false;
     }
@@ -161,9 +266,18 @@ export function useRecorder() {
     }
   }
 
+  function handleWindowFocus() {
+    void refreshPermissionState();
+  }
+
+  onMounted(() => {
+    globalThis.addEventListener("focus", handleWindowFocus);
+  });
+
   onBeforeUnmount(() => {
+    globalThis.removeEventListener("focus", handleWindowFocus);
     operationId += 1;
-    void recorder.cancel();
+    void recorder.dispose();
   });
 
   return {
@@ -179,29 +293,10 @@ export function useRecorder() {
     level,
     openPermissionSettings,
     permissionState,
+    prepareRecording,
     refreshPermissionState,
     startRecording,
     state,
     stopRecording,
   };
-}
-
-function describeRecorderError(error: unknown) {
-  if (error instanceof DOMException) {
-    if (error.name === "NotAllowedError") {
-      return "麦克风权限被拒绝，请在系统设置中允许访问后重试。";
-    }
-    if (error.name === "NotFoundError") {
-      return "没有找到可用的麦克风设备。";
-    }
-    if (error.name === "NotReadableError") {
-      return "麦克风正被其他应用占用，或设备暂时不可用。";
-    }
-  }
-
-  if (error instanceof Error && error.message === "media_devices_unavailable") {
-    return "当前运行环境不支持麦克风采集。";
-  }
-
-  return "录音初始化失败，请检查麦克风和系统权限后重试。";
 }

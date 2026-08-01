@@ -46,6 +46,7 @@ const LLM_FIRST_TOKEN_TIMEOUT_MS = 15_000;
 const MODE_STORAGE_KEY = "mindsurf.voice.mode";
 const INJECTION_LIMIT_STORAGE_KEY = "mindsurf.injection.maxCodePoints";
 const SHORTCUT_STORAGE_KEY = "mindsurf.shortcut.record";
+const SHORTCUT_ENABLED_STORAGE_KEY = "mindsurf.shortcut.enabled";
 const OVERLAY_ENABLED_STORAGE_KEY = "mindsurf.overlay.enabled";
 const OVERLAY_POSITION_STORAGE_KEY = "mindsurf.overlay.position";
 const AUTO_INJECTION_STORAGE_KEYS: Record<VoiceInteractionMode, string> = {
@@ -96,11 +97,12 @@ const state = reactive<VoiceSessionState>({
   reconnectAttempt: 0,
   requestStatus: "idle",
   shortcutBinding: readStoredShortcut(),
-  shortcutDisplay: "录音快捷键",
-  shortcutEnabled: true,
+  shortcutDesiredEnabled: readStoredBoolean(SHORTCUT_ENABLED_STORAGE_KEY, true),
+  shortcutDisplay: shortcutDisplay(readStoredShortcut()),
   shortcutError: "",
   shortcutLastEventAt: null,
   shortcutListenerStatus: "starting",
+  shortcutRegistered: false,
   selectedMode: readStoredMode(),
   selectedAsrId: "",
   selectedLlmId: "",
@@ -413,6 +415,16 @@ export function useVoiceSessionStore() {
   }
 
   async function initializeRecordShortcut() {
+    if (!state.shortcutDesiredEnabled) {
+      const disabled = await unregisterRecordShortcut();
+      if (disabled.ok) {
+        applyShortcutStatus(disabled.data);
+      } else {
+        state.shortcutError = describeShortcutError(disabled.error.code);
+      }
+      return;
+    }
+
     const result = await registerRecordShortcut(state.shortcutBinding);
     if (result.ok) {
       applyShortcutStatus(result.data);
@@ -422,7 +434,6 @@ export function useVoiceSessionStore() {
       return;
     }
 
-    state.shortcutEnabled = false;
     const shortcutError = describeShortcutError(result.error.code);
     const disabled = await unregisterRecordShortcut();
     if (disabled.ok) {
@@ -433,6 +444,13 @@ export function useVoiceSessionStore() {
 
   async function configureRecordShortcut(binding: ShortcutBinding) {
     state.shortcutError = "";
+    if (!state.shortcutDesiredEnabled) {
+      state.shortcutBinding = binding;
+      state.shortcutDisplay = shortcutDisplay(binding);
+      localStorage.setItem(SHORTCUT_STORAGE_KEY, binding);
+      return true;
+    }
+
     const result = await registerRecordShortcut(binding);
     if (!result.ok) {
       state.shortcutError = describeShortcutError(result.error.code);
@@ -445,6 +463,8 @@ export function useVoiceSessionStore() {
 
   async function setRecordShortcutEnabled(enabled: boolean) {
     state.shortcutError = "";
+    state.shortcutDesiredEnabled = enabled;
+    localStorage.setItem(SHORTCUT_ENABLED_STORAGE_KEY, String(enabled));
     const result = enabled
       ? await registerRecordShortcut(state.shortcutBinding)
       : await unregisterRecordShortcut();
@@ -696,6 +716,13 @@ function readStoredShortcut(): ShortcutBinding {
     return "ctrl_win";
   }
   const stored = localStorage.getItem(SHORTCUT_STORAGE_KEY);
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.userAgent.includes("Mac OS") &&
+    (stored === null || stored === "ctrl_win")
+  ) {
+    return "ctrl_win_space";
+  }
   return stored === "ctrl_alt_space" ||
     stored === "ctrl_shift_space" ||
     stored === "ctrl_win_space"
@@ -881,14 +908,29 @@ function describeInjectionError(code: string) {
 }
 
 function applyShortcutStatus(status: ShortcutStatus) {
-  state.shortcutBinding = status.binding;
-  state.shortcutDisplay = status.display;
-  state.shortcutEnabled = status.enabled;
+  if (status.enabled) {
+    state.shortcutBinding = status.binding;
+    state.shortcutDisplay = status.display;
+  }
+  state.shortcutRegistered = status.enabled;
   state.shortcutListenerStatus = status.listenerStatus;
   state.shortcutError =
     status.listenerStatus === "error" || status.lastError
       ? status.lastError || "系统全局键盘监听器启动失败"
       : "";
+}
+
+function shortcutDisplay(binding: ShortcutBinding) {
+  const isMacOS =
+    typeof navigator !== "undefined" && navigator.userAgent.includes("Mac OS");
+  const modifier = isMacOS ? "Control + Command" : "Ctrl + Win";
+  const labels: Record<ShortcutBinding, string> = {
+    ctrl_win: isMacOS ? `${modifier} + Space` : modifier,
+    ctrl_alt_space: isMacOS ? "Control + Option + Space" : "Ctrl + Alt + Space",
+    ctrl_shift_space: isMacOS ? "Control + Shift + Space" : "Ctrl + Shift + Space",
+    ctrl_win_space: `${modifier} + Space`,
+  };
+  return labels[binding];
 }
 
 async function refreshShortcutStatus() {
@@ -902,7 +944,7 @@ async function refreshShortcutStatus() {
 
 function describeShortcutError(code: string) {
   const messages: Record<string, string> = {
-    input_monitoring_required: "请先在系统设置中授予输入监控权限",
+    accessibility_required: "请先在系统设置中授予辅助功能权限",
     shortcut_conflict: "该快捷键已被系统或其他程序占用，请选择其他组合",
     shortcut_listener_unavailable: "系统全局快捷键监听器不可用",
     shortcut_state_unavailable: "快捷键状态暂时不可用，请重试",

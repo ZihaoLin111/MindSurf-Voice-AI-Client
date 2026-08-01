@@ -18,6 +18,7 @@ pub struct SystemPermissionStatus {
 }
 
 impl SystemPermissionStatus {
+    #[cfg(target_os = "macos")]
     fn new(permission: SystemPermission, granted: bool) -> Self {
         Self {
             permission,
@@ -31,6 +32,11 @@ impl SystemPermissionStatus {
             status: "unknown",
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn with_status(permission: SystemPermission, status: &'static str) -> Self {
+        Self { permission, status }
+    }
 }
 
 #[tauri::command]
@@ -41,10 +47,15 @@ pub fn get_system_permission_status(
 }
 
 #[tauri::command]
-pub fn request_system_permission(
+pub async fn request_system_permission(
     permission: SystemPermission,
 ) -> CommandResult<SystemPermissionStatus> {
-    platform::request(permission)
+    platform::request(permission).await
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn accessibility_is_trusted() -> bool {
+    platform::accessibility_is_trusted()
 }
 
 #[tauri::command]
@@ -65,7 +76,7 @@ mod platform {
         }
     }
 
-    pub fn request(permission: SystemPermission) -> CommandResult<SystemPermissionStatus> {
+    pub async fn request(permission: SystemPermission) -> CommandResult<SystemPermissionStatus> {
         match permission {
             SystemPermission::Microphone => {
                 CommandResult::success(SystemPermissionStatus::unknown(permission))
@@ -107,39 +118,116 @@ mod platform {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use objc2_core_graphics::{
-        CGPreflightListenEventAccess, CGPreflightPostEventAccess, CGRequestListenEventAccess,
-        CGRequestPostEventAccess,
+    use block2::RcBlock;
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+    use core_foundation::string::CFString;
+    use objc2_av_foundation::{
+        AVAuthorizationStatus, AVCaptureDevice, AVMediaType, AVMediaTypeAudio,
     };
 
     use super::{AppError, CommandResult, SystemPermission, SystemPermissionStatus};
 
     pub fn status(permission: SystemPermission) -> CommandResult<SystemPermissionStatus> {
         let status = match permission {
-            // WKWebView owns the actual microphone request. The frontend tracks
-            // this state through getUserMedia and the Permissions API.
-            SystemPermission::Microphone => SystemPermissionStatus::unknown(permission),
+            SystemPermission::Microphone => microphone_status(permission),
             SystemPermission::Accessibility => {
-                SystemPermissionStatus::new(permission, CGPreflightPostEventAccess())
+                SystemPermissionStatus::new(permission, accessibility_is_trusted())
             }
-            SystemPermission::InputMonitoring => {
-                SystemPermissionStatus::new(permission, CGPreflightListenEventAccess())
-            }
+            // macOS does not expose a reliable API for whether the application is
+            // explicitly enabled in the Input Monitoring settings pane. In
+            // particular, CGPreflightListenEventAccess may also return true when
+            // Accessibility grants equivalent event-listening capability.
+            SystemPermission::InputMonitoring => SystemPermissionStatus::unknown(permission),
         };
         CommandResult::success(status)
     }
 
-    pub fn request(permission: SystemPermission) -> CommandResult<SystemPermissionStatus> {
+    pub async fn request(permission: SystemPermission) -> CommandResult<SystemPermissionStatus> {
         let status = match permission {
-            SystemPermission::Microphone => SystemPermissionStatus::unknown(permission),
+            SystemPermission::Microphone => return request_microphone(permission).await,
             SystemPermission::Accessibility => {
-                SystemPermissionStatus::new(permission, CGRequestPostEventAccess())
+                SystemPermissionStatus::new(permission, request_accessibility())
             }
-            SystemPermission::InputMonitoring => {
-                SystemPermissionStatus::new(permission, CGRequestListenEventAccess())
-            }
+            SystemPermission::InputMonitoring => SystemPermissionStatus::unknown(permission),
         };
         CommandResult::success(status)
+    }
+
+    pub fn accessibility_is_trusted() -> bool {
+        unsafe { AXIsProcessTrusted() }
+    }
+
+    fn request_accessibility() -> bool {
+        let options = CFDictionary::from_CFType_pairs(&[(
+            CFString::new("AXTrustedCheckOptionPrompt"),
+            CFBoolean::true_value(),
+        )]);
+        unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) }
+    }
+
+    fn microphone_status(permission: SystemPermission) -> SystemPermissionStatus {
+        let Ok(media_type) = microphone_media_type() else {
+            return SystemPermissionStatus::unknown(permission);
+        };
+        let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media_type) };
+        SystemPermissionStatus::with_status(permission, microphone_status_name(status))
+    }
+
+    async fn request_microphone(
+        permission: SystemPermission,
+    ) -> CommandResult<SystemPermissionStatus> {
+        let media_type = match microphone_media_type() {
+            Ok(media_type) => media_type,
+            Err(error) => return CommandResult::failure(error),
+        };
+        let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media_type) };
+        if status != AVAuthorizationStatus::NotDetermined {
+            return CommandResult::success(SystemPermissionStatus::with_status(
+                permission,
+                microphone_status_name(status),
+            ));
+        }
+
+        let (sender, mut receiver) = tauri::async_runtime::channel(1);
+        {
+            let handler = RcBlock::new(move |granted| {
+                let _ = sender.blocking_send(bool::from(granted));
+            });
+            unsafe {
+                AVCaptureDevice::requestAccessForMediaType_completionHandler(media_type, &handler);
+            }
+        }
+
+        match receiver.recv().await {
+            Some(_) => CommandResult::success(microphone_status(permission)),
+            None => CommandResult::failure(AppError::new(
+                "microphone_permission_request_failed",
+                "macOS did not return a microphone permission decision",
+                true,
+            )),
+        }
+    }
+
+    fn microphone_media_type() -> Result<&'static AVMediaType, AppError> {
+        unsafe { AVMediaTypeAudio }.ok_or_else(|| {
+            AppError::new(
+                "microphone_permission_unavailable",
+                "AVFoundation audio permission support is unavailable",
+                false,
+            )
+        })
+    }
+
+    fn microphone_status_name(status: AVAuthorizationStatus) -> &'static str {
+        match status {
+            AVAuthorizationStatus::NotDetermined => "not_determined",
+            AVAuthorizationStatus::Restricted => "restricted",
+            AVAuthorizationStatus::Denied => "denied",
+            AVAuthorizationStatus::Authorized => "granted",
+            _ => "unknown",
+        }
     }
 
     pub fn open_settings(permission: SystemPermission) -> CommandResult<()> {
@@ -159,6 +247,12 @@ mod platform {
             )),
         }
     }
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -169,7 +263,7 @@ mod platform {
         unsupported()
     }
 
-    pub fn request(_permission: SystemPermission) -> CommandResult<SystemPermissionStatus> {
+    pub async fn request(_permission: SystemPermission) -> CommandResult<SystemPermissionStatus> {
         unsupported()
     }
 
