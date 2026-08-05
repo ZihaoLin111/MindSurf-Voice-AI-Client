@@ -3,6 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 
 import { getNativeAudioRecordingMeter } from "./services/nativeRecorder";
+import { setLocale, useI18n } from "./services/i18n";
 import {
   notifyOverlayReady,
   requestOverlayCancel,
@@ -11,12 +12,15 @@ import {
 import type { OverlaySnapshot } from "./types/overlay";
 import { VOICE_MODE_LABELS } from "./types/voice";
 
+const { t } = useI18n();
+
 const snapshot = reactive<OverlaySnapshot>({
   assistantText: "",
   cancellable: false,
   duration: "00:00.0",
   durationMs: 0,
   level: 0,
+  locale: "zh-CN",
   mode: "dictation",
   recording: false,
   status: "准备录音",
@@ -38,7 +42,7 @@ let targetLevel = 0;
 let unlisten: (() => void) | null = null;
 
 const displayText = computed(
-  () => snapshot.assistantText || snapshot.transcript || "正在等待语音输入…",
+  () => snapshot.assistantText || snapshot.transcript || t("正在等待语音输入…"),
 );
 const displayedDuration = computed(() => formatDuration(displayedDurationMs.value));
 const meterWidth = computed(() => `${Math.max(4, displayedLevel.value * 100)}%`);
@@ -54,6 +58,7 @@ function formatDuration(durationMs: number) {
 }
 
 function updateLocalSnapshot(next: OverlaySnapshot) {
+  setLocale(next.locale);
   Object.assign(snapshot, next);
   if (!usesNativeMeter || !nativeRecordingActive.value) {
     const deliveryDelayMs = next.recording
@@ -152,19 +157,19 @@ onBeforeUnmount(() => {
   <main class="voice-overlay" :data-active="snapshot.cancellable">
     <div class="overlay-status">
       <span class="overlay-status-dot" aria-hidden="true"></span>
-      <strong>{{ snapshot.status }}</strong>
-      <span>{{ VOICE_MODE_LABELS[snapshot.mode] }}</span>
+      <strong>{{ t(snapshot.status) }}</strong>
+      <span>{{ t(VOICE_MODE_LABELS[snapshot.mode]) }}</span>
       <time>{{ displayedDuration }}</time>
     </div>
 
     <p :title="displayText">{{ displayText }}</p>
 
     <div class="overlay-footer">
-      <div class="overlay-meter" aria-label="输入音量">
+      <div class="overlay-meter" :aria-label="t('输入音量')">
         <span :style="{ width: meterWidth }"></span>
       </div>
       <button v-if="snapshot.cancellable" type="button" @click="requestOverlayCancel">
-        取消
+        {{ t("取消") }}
       </button>
     </div>
   </main>

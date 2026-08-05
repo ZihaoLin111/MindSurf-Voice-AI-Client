@@ -6,7 +6,7 @@ import { WebSocket } from "ws";
 const port = 18_000 + Math.floor(Math.random() * 1_000);
 const child = spawn(process.execPath, ["server.mjs"], {
   cwd: import.meta.dirname,
-  env: { ...process.env, PORT: String(port) },
+  env: { ...process.env, PORT: String(port), MOCK_AUTH_TOKEN: "test-token" },
   stdio: ["ignore", "pipe", "inherit"],
 });
 
@@ -14,9 +14,33 @@ try {
   await waitForListening(child);
   await runProtocolFlow(port, "dictation");
   await runProtocolFlow(port, "assistant");
-  console.log("Mock protocol flow passed.");
+  await runAuthenticationFailure(port, "wrong-token", "authentication_failed");
+  await runAuthenticationFailure(port, null, "authentication_required");
+  await runAuthenticationFailure(port, "expired-token", "token_expired");
 } finally {
   child.kill();
+}
+
+const faultPort = port + 1_000;
+const faultChild = spawn(
+  process.execPath,
+  [
+    "server.mjs",
+    "--fault",
+    "duplicate_event_id,stale_request_id,unknown_message_type,out_of_order_control",
+  ],
+  {
+    cwd: import.meta.dirname,
+    env: { ...process.env, PORT: String(faultPort) },
+    stdio: ["ignore", "pipe", "inherit"],
+  },
+);
+try {
+  await waitForListening(faultChild);
+  await runInjectedProtocolMessages(faultPort);
+  console.log("Mock normal and injected protocol flows passed.");
+} finally {
+  faultChild.kill();
 }
 
 function runProtocolFlow(serverPort, mode) {
@@ -61,6 +85,7 @@ function runProtocolFlow(serverPort, mode) {
             channels: 1,
           },
         ],
+        auth: { scheme: "bearer", token: "test-token" },
       });
     });
 
@@ -89,8 +114,7 @@ function runProtocolFlow(serverPort, mode) {
             asr: "asr-mock",
             llm: mode === "assistant" ? "llm-mock" : null,
             tts: mode === "assistant" ? "tts-mock" : null,
-            output_audio:
-              mode === "assistant" ? "pcm16-24k-mono" : null,
+            output_audio: mode === "assistant" ? "pcm16-24k-mono" : null,
           },
           input_audio: {
             encoding: "pcm_s16le",
@@ -143,8 +167,7 @@ function runProtocolFlow(serverPort, mode) {
         if (
           committed &&
           finalReceived &&
-          (mode === "dictation" ||
-            (assistantDone && audioStarted && audioDone))
+          (mode === "dictation" || (assistantDone && audioStarted && audioDone))
         ) {
           resolve();
         } else {
@@ -153,10 +176,123 @@ function runProtocolFlow(serverPort, mode) {
       } else if (message.type === "error") {
         clearTimeout(timeout);
         socket.close();
-        reject(new Error(`${message.payload.code}: ${message.payload.message}`));
+        reject(
+          new Error(`${message.payload.code}: ${message.payload.message}`),
+        );
       }
     });
 
+    socket.on("error", reject);
+  });
+}
+
+function runAuthenticationFailure(serverPort, token, expectedCode) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(
+      `ws://127.0.0.1:${serverPort}/v1/voice/ws`,
+      "mindsurf.voice.v1",
+    );
+    const timeout = setTimeout(
+      () => reject(new Error("auth test timed out")),
+      3_000,
+    );
+    socket.on("open", () => {
+      send(socket, "client.hello", null, {
+        client: {
+          name: "mock-test",
+          version: "0.1.0",
+          platform: "windows",
+          arch: "x86_64",
+        },
+        protocol_versions: [1],
+        pipelines: ["cascade"],
+        input_audio: [],
+        output_audio: [],
+        ...(token ? { auth: { scheme: "bearer", token } } : {}),
+      });
+    });
+    socket.on("message", (data) => {
+      const message = JSON.parse(data.toString("utf8"));
+      if (message.type === "error") {
+        clearTimeout(timeout);
+        socket.close();
+        if (message.payload.code === expectedCode) resolve();
+        else
+          reject(new Error(`unexpected auth error: ${message.payload.code}`));
+      }
+    });
+    socket.on("error", reject);
+  });
+}
+
+function runInjectedProtocolMessages(serverPort) {
+  return new Promise((resolve, reject) => {
+    const requestId = randomUUID();
+    const socket = new WebSocket(
+      `ws://127.0.0.1:${serverPort}/v1/voice/ws`,
+      "mindsurf.voice.v1",
+    );
+    const received = [];
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error("fault injection test timed out"));
+    }, 5_000);
+    socket.on("open", () => {
+      send(socket, "client.hello", null, {
+        client: {
+          name: "fault-test",
+          version: "0.1.0",
+          platform: "windows",
+          arch: "x86_64",
+        },
+        protocol_versions: [1],
+        pipelines: ["cascade"],
+        input_audio: [],
+        output_audio: [],
+      });
+    });
+    socket.on("message", (data, isBinary) => {
+      if (isBinary) return;
+      const message = JSON.parse(data.toString("utf8"));
+      received.push(message);
+      if (message.type === "server.hello") {
+        send(socket, "request.start", requestId, {
+          mode: "dictation",
+          language: "auto",
+          selection: {
+            asr: "asr-mock",
+            llm: null,
+            tts: null,
+            output_audio: null,
+          },
+          response: { text: false, audio: false, voice: "default" },
+        });
+      } else if (message.type === "request.accepted") {
+        send(socket, "input.commit", requestId, {
+          last_sequence: null,
+          frame_count: 0,
+          sample_count: 0,
+          duration_ms: 0,
+        });
+      }
+      const partials = received.filter(
+        (item) => item.type === "asr.partial" && item.request_id === requestId,
+      );
+      const hasDuplicate =
+        partials.length >= 2 && partials[0].event_id === partials[1].event_id;
+      const hasStale = received.some(
+        (item) => item.type === "asr.partial" && item.request_id !== requestId,
+      );
+      const hasUnknown = received.some((item) => item.type === "mock.unknown");
+      const hasOutOfOrder = received.some(
+        (item) => item.type === "output.audio.done",
+      );
+      if (hasDuplicate && hasStale && hasUnknown && hasOutOfOrder) {
+        clearTimeout(timeout);
+        socket.close();
+        resolve();
+      }
+    });
     socket.on("error", reject);
   });
 }

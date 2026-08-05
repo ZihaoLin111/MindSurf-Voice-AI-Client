@@ -573,6 +573,52 @@ h1 {
   font-size: 0.72rem;
 }
 
+.system-dialog-backdrop {
+  position: fixed;
+  z-index: 10000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 38%);
+}
+
+.system-dialog {
+  width: min(420px, 100%);
+  padding: 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 24%);
+}
+
+.system-dialog h2 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.system-dialog p {
+  margin: 12px 0 18px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.system-dialog[data-kind="warning"] {
+  border-color: var(--warning);
+}
+
+.system-dialog[data-kind="error"] {
+  border-color: var(--danger-border);
+}
+
+.system-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .inline-action {
   margin-left: 10px;
   padding: 0;
@@ -1026,6 +1072,19 @@ h1 {
   flex: 1;
 }
 
+.shortcut-setting kbd {
+  min-width: 150px;
+  flex: 1;
+  padding: 6px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--surface-muted);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
 .shortcut-setting label {
   display: inline-flex;
   flex: none;
@@ -1127,6 +1186,204 @@ h1 {
   color: var(--text-muted);
   background: var(--surface);
   font-size: 0.62rem;
+}
+
+.diagnostics-body {
+  display: grid;
+  gap: 12px;
+}
+
+.diagnostics-section {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.section-title-row,
+.timeline-summary,
+.metric-strip,
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-title-row {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.section-title-row h2 {
+  margin: 0;
+  font-size: 0.83rem;
+}
+
+.section-title-row small,
+.timeline-list small,
+.log-list small {
+  color: var(--text-muted);
+  font-size: 0.62rem;
+}
+
+.section-title-row select,
+.log-filters select,
+.log-filters input {
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 0.68rem;
+}
+
+.timeline-summary,
+.metric-strip {
+  margin-bottom: 10px;
+}
+
+.timeline-summary span,
+.metric-strip span {
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--surface-muted);
+  font-size: 0.67rem;
+}
+
+.timeline-list {
+  display: grid;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.timeline-list li {
+  display: grid;
+  grid-template-columns: 66px 10px minmax(0, 1fr);
+  gap: 8px;
+  min-height: 42px;
+}
+
+.timeline-list time {
+  padding-top: 2px;
+  color: var(--text-muted);
+  font: 0.62rem/1.4 monospace;
+  text-align: right;
+}
+
+.timeline-dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.timeline-dot::after {
+  position: absolute;
+  top: 10px;
+  bottom: -27px;
+  left: 3px;
+  width: 1px;
+  background: var(--border-strong);
+  content: "";
+}
+
+.timeline-list li:last-child .timeline-dot::after {
+  display: none;
+}
+
+.timeline-list li > div {
+  display: grid;
+  gap: 2px;
+  padding-bottom: 9px;
+}
+
+.timeline-list strong {
+  font-size: 0.69rem;
+}
+
+.timeline-list code {
+  color: var(--text-muted);
+  font-size: 0.61rem;
+}
+
+.log-filters {
+  margin-bottom: 8px;
+}
+
+.log-filters input {
+  flex: 1 1 150px;
+}
+
+.log-list {
+  max-height: 260px;
+  margin-bottom: 8px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+
+.log-list article {
+  display: grid;
+  grid-template-columns: 66px 42px minmax(120px, 0.65fr) minmax(180px, 1fr);
+  gap: 7px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.63rem;
+}
+
+.log-list article:last-child {
+  border-bottom: 0;
+}
+
+.log-list time,
+.log-list code {
+  color: var(--text-muted);
+}
+
+.log-level {
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.log-level[data-level="warn"] {
+  color: var(--warning);
+}
+
+.log-level[data-level="error"] {
+  color: var(--danger);
+}
+
+.log-level[data-level="info"],
+.inline-success {
+  color: var(--success);
+}
+
+.log-list small {
+  grid-column: 3 / -1;
+}
+
+.log-request-link {
+  grid-column: 3 / -1;
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.empty-state {
+  margin: 8px 0;
+  color: var(--text-muted);
+  font-size: 0.68rem;
 }
 
 @keyframes recording-pulse {

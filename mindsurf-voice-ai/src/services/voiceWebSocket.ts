@@ -26,23 +26,6 @@ const FATAL_BACKPRESSURE_BYTES = 1_024 * 1_024;
 const MAX_CONGESTION_MS = 2_000;
 const RECONNECT_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000, 15_000];
 
-const KNOWN_MESSAGE_TYPES = new Set([
-  "server.hello",
-  "session.ping",
-  "session.pong",
-  "request.accepted",
-  "input.committed",
-  "asr.partial",
-  "asr.final",
-  "assistant.text.delta",
-  "assistant.text.done",
-  "output.audio.start",
-  "output.audio.done",
-  "request.done",
-  "request.cancelled",
-  "error",
-]);
-
 export interface VoiceClientIdentity {
   version: string;
   platform: string;
@@ -56,6 +39,11 @@ export interface VoiceWebSocketCallbacks {
   onServerHello: (payload: ServerHelloPayload) => void;
   onStatusChange: (status: ServiceConnectionStatus) => void;
   onTransportError: (error: VoiceTransportError) => void;
+}
+
+export interface VoiceTransportOptions {
+  autoReconnect?: boolean;
+  tokenProvider?: () => Promise<string | null>;
 }
 
 interface MessageWaiter {
@@ -80,7 +68,6 @@ export class VoiceTransportError extends Error {
 export class VoiceWebSocketClient {
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private congestionStartedAt: number | null = null;
-  private eventIds = new Set<string>();
   private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
@@ -95,6 +82,7 @@ export class VoiceWebSocketClient {
     private readonly url: string,
     private readonly identity: VoiceClientIdentity,
     private readonly callbacks: VoiceWebSocketCallbacks,
+    private readonly options: VoiceTransportOptions = {},
   ) {}
 
   get negotiatedServerHello() {
@@ -134,14 +122,14 @@ export class VoiceWebSocketClient {
       this.socket?.close();
     }, CONNECT_TIMEOUT_MS);
 
-    this.socket.onopen = () => this.handleOpen();
+    this.socket.onopen = () => void this.handleOpen();
     this.socket.onmessage = (event) => this.handleMessage(event);
     this.socket.onerror = () => {
       this.callbacks.onTransportError(
         new VoiceTransportError("connection_failed", "推理服务连接异常"),
       );
     };
-    this.socket.onclose = () => this.handleClose();
+    this.socket.onclose = (event) => this.handleClose(event);
   }
 
   disconnect() {
@@ -239,7 +227,7 @@ export class VoiceWebSocketClient {
     await cancelled;
   }
 
-  private handleOpen() {
+  private async handleOpen() {
     this.clearTimer("connect");
 
     if (this.socket?.protocol !== VOICE_SUBPROTOCOL) {
@@ -254,6 +242,32 @@ export class VoiceWebSocketClient {
       return;
     }
 
+    this.handshakeTimer = setTimeout(() => {
+      this.callbacks.onTransportError(
+        new VoiceTransportError("handshake_timeout", "协议握手超时"),
+      );
+      this.socket?.close(4_001, "handshake timeout");
+    }, HANDSHAKE_TIMEOUT_MS);
+
+    let token: string | null;
+    try {
+      token = this.options.tokenProvider
+        ? ((await this.options.tokenProvider()) ?? null)
+        : null;
+    } catch (error) {
+      this.callbacks.onTransportError(
+        new VoiceTransportError(
+          "credential_unavailable",
+          error instanceof Error ? error.message : "无法读取服务 Token",
+          false,
+        ),
+      );
+      this.userClosed = true;
+      this.setStatus("error");
+      this.socket?.close(4_003, "credential unavailable");
+      return;
+    }
+    if (this.socket?.readyState !== WebSocket.OPEN) return;
     this.sendControl("client.hello", null, {
       client: {
         name: "mindsurf-voice-ai",
@@ -277,14 +291,15 @@ export class VoiceWebSocketClient {
           channels: 1,
         },
       ],
+      ...(token
+        ? {
+            auth: {
+              scheme: "bearer",
+              token,
+            },
+          }
+        : {}),
     });
-
-    this.handshakeTimer = setTimeout(() => {
-      this.callbacks.onTransportError(
-        new VoiceTransportError("handshake_timeout", "协议握手超时"),
-      );
-      this.socket?.close(4_001, "handshake timeout");
-    }, HANDSHAKE_TIMEOUT_MS);
   }
 
   private handleMessage(event: MessageEvent) {
@@ -336,24 +351,6 @@ export class VoiceWebSocketClient {
       return;
     }
 
-    if (this.eventIds.has(message.event_id)) {
-      return;
-    }
-    this.eventIds.add(message.event_id);
-    if (this.eventIds.size > 1_024) {
-      this.eventIds.clear();
-      this.eventIds.add(message.event_id);
-    }
-
-    if (!KNOWN_MESSAGE_TYPES.has(message.type)) {
-      this.sendProtocolError(
-        "unsupported_message_type",
-        `不支持消息类型 ${message.type}`,
-        message.request_id,
-      );
-      return;
-    }
-
     if (message.type === "server.hello") {
       try {
         validateServerHello(message.payload);
@@ -373,7 +370,7 @@ export class VoiceWebSocketClient {
       this.setStatus("connected");
       this.callbacks.onServerHello(message.payload);
       this.scheduleHeartbeatWatchdog();
-    } else if (!this.serverHello) {
+    } else if (!this.serverHello && message.type !== "error") {
       this.sendProtocolError("handshake_required", "握手完成前收到业务消息");
       this.socket?.close(1_002, "handshake required");
       return;
@@ -390,6 +387,16 @@ export class VoiceWebSocketClient {
 
     if (message.type === "error") {
       const payload = message.payload as Partial<ProtocolErrorPayload>;
+      if (
+        payload.fatal &&
+        ["authentication_required", "authentication_failed", "token_expired"].includes(
+          payload.code ?? "",
+        )
+      ) {
+        this.userClosed = true;
+        this.setStatus("error");
+        this.socket?.close(4_003, "authentication failed");
+      }
       this.rejectMatchingWaiters(
         message.request_id,
         new VoiceTransportError(
@@ -405,7 +412,7 @@ export class VoiceWebSocketClient {
     this.callbacks.onControlMessage(message);
   }
 
-  private handleClose() {
+  private handleClose(event?: CloseEvent) {
     this.clearTimer("connect");
     this.clearTimer("handshake");
     this.clearTimer("heartbeat");
@@ -417,10 +424,16 @@ export class VoiceWebSocketClient {
     );
 
     if (this.userClosed) {
-      this.setStatus("disconnected");
+      if (this.status !== "error") this.setStatus("disconnected");
       return;
     }
 
+    const closeReason = event?.reason
+      ? `WebSocket 已断开：${event.reason} (${event.code})`
+      : `WebSocket 已断开 (${event?.code ?? 1006})`;
+    this.callbacks.onTransportError(
+      new VoiceTransportError("connection_closed", closeReason),
+    );
     this.scheduleReconnect();
   }
 
@@ -430,6 +443,10 @@ export class VoiceWebSocketClient {
   }
 
   private scheduleReconnect() {
+    if (this.options.autoReconnect === false) {
+      this.setStatus("error");
+      return;
+    }
     this.setStatus("reconnecting");
     const delay =
       RECONNECT_DELAYS_MS[
