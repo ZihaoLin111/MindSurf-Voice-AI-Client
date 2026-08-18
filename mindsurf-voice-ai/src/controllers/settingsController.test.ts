@@ -1,55 +1,61 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { settingsStoreActions, useSettingsStore } from "../stores/settingsStore";
-import type { ServiceProfile } from "../types/settings";
+const autostartMocks = vi.hoisted(() => ({
+  isAutostartEnabled: vi.fn(),
+  setAutostartEnabled: vi.fn(),
+}));
+
+vi.mock("../services/autostart", () => autostartMocks);
+
+import { useSettingsStore } from "../stores/settingsStore";
 import { SettingsController } from "./settingsController";
 
-const { clearServiceToken, getCredentialStatus, reconnectWithCurrentSettings } =
-  vi.hoisted(() => ({
-    clearServiceToken: vi.fn().mockResolvedValue(false),
-    getCredentialStatus: vi.fn().mockResolvedValue(false),
-    reconnectWithCurrentSettings: vi.fn(),
-  }));
-
-vi.mock("../services/settings/credentials", () => ({
-  clearServiceToken,
-  getCredentialStatus,
-  saveServiceToken: vi.fn(),
-}));
-
-vi.mock("./voiceRequestController", () => ({
-  voiceRequestController: { reconnectWithCurrentSettings },
-}));
-
-describe("SettingsController service profile deletion", () => {
+describe("SettingsController autostart", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("deletes the requested profile and protects the final profile", async () => {
-    const profile: ServiceProfile = {
-      id: "profile-to-delete",
-      name: "待删除服务",
-      websocketUrl: "wss://voice.example.com/v1/voice/ws",
-      autoConnect: false,
-      authMode: "none",
-      preferredPipeline: "auto",
-      createdAt: 1,
-      updatedAt: 1,
-    };
-    settingsStoreActions.addServiceProfile(profile);
-    const controller = new SettingsController();
+  it("loads the registration state from the operating system", async () => {
+    autostartMocks.isAutostartEnabled.mockResolvedValue(true);
 
-    await controller.deleteServiceProfile(profile.id);
+    await new SettingsController().refreshAutostart();
 
-    const settings = useSettingsStore().state;
-    expect(settings.serviceProfiles.map((item) => item.id)).toEqual(["local-mock"]);
-    expect(settings.activeServiceProfileId).toBe("local-mock");
-    expect(clearServiceToken).toHaveBeenCalledWith(profile.id);
-    expect(getCredentialStatus).toHaveBeenCalledWith("local-mock");
-    expect(reconnectWithCurrentSettings).toHaveBeenCalledOnce();
-    await expect(controller.deleteServiceProfile("local-mock")).rejects.toThrow(
-      "至少保留一个服务配置",
+    expect(useSettingsStore().state.autostartEnabled).toBe(true);
+    expect(useSettingsStore().state.autostartStatus).toBe("ready");
+  });
+
+  it("changes and verifies the registration state", async () => {
+    autostartMocks.setAutostartEnabled.mockResolvedValue(undefined);
+    autostartMocks.isAutostartEnabled.mockResolvedValue(false);
+
+    await expect(new SettingsController().setAutostartEnabled(false)).resolves.toBe(
+      true,
     );
+
+    expect(autostartMocks.setAutostartEnabled).toHaveBeenCalledWith(false);
+    expect(useSettingsStore().state.autostartEnabled).toBe(false);
+  });
+
+  it("surfaces plugin failures without changing the last known state", async () => {
+    autostartMocks.setAutostartEnabled.mockRejectedValue(new Error("denied"));
+
+    await expect(new SettingsController().setAutostartEnabled(true)).resolves.toBe(
+      false,
+    );
+
+    expect(useSettingsStore().state.autostartStatus).toBe("unavailable");
+    expect(useSettingsStore().state.autostartError).toContain("denied");
+  });
+
+  it("rejects a registration state that does not match the requested value", async () => {
+    autostartMocks.setAutostartEnabled.mockResolvedValue(undefined);
+    autostartMocks.isAutostartEnabled.mockResolvedValue(false);
+
+    await expect(new SettingsController().setAutostartEnabled(true)).resolves.toBe(
+      false,
+    );
+
+    expect(useSettingsStore().state.autostartEnabled).toBe(false);
+    expect(useSettingsStore().state.autostartStatus).toBe("unavailable");
   });
 });

@@ -1,0 +1,100 @@
+{
+  "format_version": 2,
+  "cases": [
+    {
+      "name": "request ID must be UUID",
+      "direction": "client",
+      "message": {"v": 2, "type": "request.cancel", "event_id": "10000000-0000-4000-8000-000000000001", "request_id": null, "sent_at_ms": 1, "payload": {"reason": "user_cancelled"}}
+    },
+    {
+      "name": "session request ID must be null",
+      "direction": "client",
+      "message": {"v": 2, "type": "session.pong", "event_id": "10000000-0000-4000-8000-000000000002", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 2, "payload": {"nonce": "hb-1"}}
+    },
+    {
+      "name": "unknown type rejected",
+      "direction": "client",
+      "message": {"v": 2, "type": "request.pause", "event_id": "10000000-0000-4000-8000-000000000003", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 3, "payload": {}}
+    },
+    {
+      "name": "hello auth forbidden",
+      "direction": "client",
+      "message": {"v": 2, "type": "client.hello", "event_id": "10000000-0000-4000-8000-000000000004", "request_id": null, "sent_at_ms": 4, "payload": {"client": {"name": "test", "version": "2", "platform": "test", "arch": "test"}, "protocol_versions": [2], "input_audio": [{"encoding": "pcm_s16le", "sample_rate": 16000, "channels": 1}], "auth": {"scheme": "bearer", "token": "legacy"}}}
+    },
+    {
+      "name": "legacy task forbidden",
+      "direction": "client",
+      "message": {"v": 2, "type": "request.start", "event_id": "10000000-0000-4000-8000-000000000005", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 5, "payload": {"mode": "asr_llm", "task": "polish", "pipeline": "opaque-b", "capabilities_revision": "cap-mode-test-1", "selection": {"asr": "asr-default", "llm": "llm-default"}, "language": "zh-CN"}}
+    },
+    {
+      "name": "asr_only cannot select LLM",
+      "direction": "client",
+      "message": {"v": 2, "type": "request.start", "event_id": "10000000-0000-4000-8000-000000000006", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 6, "payload": {"mode": "asr_only", "pipeline": "opaque-c", "capabilities_revision": "cap-mode-test-1", "selection": {"asr": "asr-default", "llm": "llm-default"}, "language": "zh-CN"}}
+    },
+    {
+      "name": "asr_only cannot carry generation",
+      "direction": "client",
+      "message": {"v": 2, "type": "request.start", "event_id": "10000000-0000-4000-8000-000000000007", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 7, "payload": {"mode": "asr_only", "pipeline": "opaque-a", "capabilities_revision": "cap-mode-test-1", "selection": {"asr": "asr-default", "llm": null}, "language": "zh-CN", "generation": {"temperature": 0.2}}}
+    },
+    {
+      "name": "asr_llm requires LLM",
+      "direction": "client",
+      "message": {"v": 2, "type": "request.start", "event_id": "10000000-0000-4000-8000-000000000008", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 8, "payload": {"mode": "asr_llm", "pipeline": "opaque-b", "capabilities_revision": "cap-mode-test-1", "selection": {"asr": "asr-default", "llm": null}, "language": "zh-CN"}}
+    },
+    {
+      "name": "LLM transition snapshot must be empty",
+      "direction": "server",
+      "message": {"v": 2, "type": "output.text.snapshot", "event_id": "10000000-0000-4000-8000-000000000009", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 9, "payload": {"stage": "llm", "text": "partial", "final": false}}
+    },
+    {
+      "name": "request done cannot be partial",
+      "direction": "server",
+      "message": {"v": 2, "type": "request.done", "event_id": "10000000-0000-4000-8000-00000000000a", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 10, "payload": {"result": "partial", "mode": "asr_llm", "final_text": "text", "usage": {"input_audio_ms": 1000, "llm_input_tokens": 1, "llm_output_tokens": 1, "asr_credits_charged": 1, "llm_credits_charged": 1, "credits_charged": 2}}}
+    },
+    {
+      "name": "fatal error is session scoped",
+      "direction": "server",
+      "message": {"v": 2, "type": "error", "event_id": "10000000-0000-4000-8000-00000000000b", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 11, "payload": {"code": "session_revoked", "message": "revoked", "stage": "authorization", "terminal": false, "retryable": false, "fatal": true, "details": {}}}
+    },
+    {
+      "name": "session revoked must be fatal",
+      "direction": "server",
+      "message": {"v": 2, "type": "error", "event_id": "10000000-0000-4000-8000-00000000000c", "request_id": null, "sent_at_ms": 12, "payload": {"code": "session_revoked", "message": "revoked", "stage": "authorization", "terminal": false, "retryable": true, "fatal": false, "details": {}}}
+    },
+    {
+      "name": "session error cannot terminate a request",
+      "direction": "server",
+      "message": {"v": 2, "type": "error", "event_id": "10000000-0000-4000-8000-00000000000d", "request_id": null, "sent_at_ms": 13, "payload": {"code": "invalid_message", "message": "invalid", "stage": "protocol", "terminal": true, "retryable": false, "fatal": false, "details": {}}}
+    },
+    {
+      "name": "request error must be terminal",
+      "direction": "server",
+      "message": {"v": 2, "type": "error", "event_id": "10000000-0000-4000-8000-00000000000e", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 14, "payload": {"code": "input_statistics_mismatch", "message": "mismatch", "stage": "input", "terminal": false, "retryable": false, "fatal": false, "details": {}}}
+    },
+    {
+      "name": "protocol mismatch must be fatal",
+      "direction": "server",
+      "message": {"v": 2, "type": "error", "event_id": "10000000-0000-4000-8000-00000000000f", "request_id": null, "sent_at_ms": 15, "payload": {"code": "protocol_version_mismatch", "message": "mismatch", "stage": "protocol", "terminal": false, "retryable": false, "fatal": false, "details": {}}}
+    },
+    {
+      "name": "request-only code requires request ID",
+      "direction": "server",
+      "message": {"v": 2, "type": "error", "event_id": "10000000-0000-4000-8000-000000000010", "request_id": null, "sent_at_ms": 16, "payload": {"code": "asr_failed", "message": "failed", "stage": "asr", "terminal": false, "retryable": true, "fatal": false, "details": {}}}
+    },
+    {
+      "name": "error code fixes stage",
+      "direction": "server",
+      "message": {"v": 2, "type": "error", "event_id": "10000000-0000-4000-8000-000000000011", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 17, "payload": {"code": "quota_exhausted", "message": "quota", "stage": "llm", "terminal": true, "retryable": false, "fatal": false, "details": {}, "usage": {"input_audio_ms": 0, "llm_input_tokens": 0, "llm_output_tokens": 0, "asr_credits_charged": 0, "llm_credits_charged": 0, "credits_charged": 0}}}
+    },
+    {
+      "name": "rate limit requires retry delay",
+      "direction": "server",
+      "message": {"v": 2, "type": "error", "event_id": "10000000-0000-4000-8000-000000000012", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 18, "payload": {"code": "rate_limit_exceeded", "message": "slow down", "stage": "quota", "terminal": true, "retryable": true, "fatal": false, "details": {}, "usage": {"input_audio_ms": 0, "llm_input_tokens": 0, "llm_output_tokens": 0, "asr_credits_charged": 0, "llm_credits_charged": 0, "credits_charged": 0}}}
+    },
+    {
+      "name": "invalid selection requires field path",
+      "direction": "server",
+      "message": {"v": 2, "type": "error", "event_id": "10000000-0000-4000-8000-000000000013", "request_id": "00112233-4455-6677-8899-aabbccddeeff", "sent_at_ms": 19, "payload": {"code": "invalid_selection", "message": "invalid", "stage": "routing", "terminal": true, "retryable": false, "fatal": false, "details": {}, "usage": {"input_audio_ms": 0, "llm_input_tokens": 0, "llm_output_tokens": 0, "asr_credits_charged": 0, "llm_credits_charged": 0, "credits_charged": 0}}}
+    }
+  ]
+}

@@ -73,13 +73,7 @@ async function replaceAppMenu(options: AppMenuOptions) {
         text: t("页面"),
         items: [
           pageItem("app-page-record", "录音", "record", options, "CmdOrCtrl+1"),
-          pageItem(
-            "app-page-permissions",
-            "权限",
-            "permissions",
-            options,
-            "CmdOrCtrl+2",
-          ),
+          pageItem("app-page-history", "历史", "history", options, "CmdOrCtrl+2"),
           pageItem(
             "app-page-diagnostics",
             "诊断",

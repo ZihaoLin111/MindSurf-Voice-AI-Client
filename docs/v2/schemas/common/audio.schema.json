@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mindsurf.dev/schemas/voice/v2/common/audio.schema.json",
+  "title": "MindSurf Voice v2 input audio format",
+  "$defs": {
+    "inputAudioFormat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoding", "sample_rate", "channels"],
+      "properties": {
+        "encoding": { "const": "pcm_s16le" },
+        "sample_rate": { "const": 16000 },
+        "channels": { "const": 1 }
+      }
+    }
+  }
+}

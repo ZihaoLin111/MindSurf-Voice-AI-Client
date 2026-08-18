@@ -26,6 +26,12 @@
 刷新或应用重启不会重新启用；如果用户期望启用但因权限不足启动失败，授权后
 会自动重新注册。
 
+“常规与快捷键”中的“登录时自动启动”使用用户级 LaunchAgent，不需要管理员
+权限。自启动进程携带 `--autostart` 参数，照常初始化主 WebView、全局快捷键和
+托盘等后台能力，但不显示主窗口，也不在 Dock 中保留常规应用图标；从托盘或
+再次启动应用时会恢复常规激活策略并显示主窗口。开关状态以系统注册结果为准，
+不额外保存一份可能失效的本地副本。
+
 macOS 正式录音使用原生 AVAudioRecorder，不依赖隐藏 WKWebView 的
 `getUserMedia()`。停止录音后读取单声道 PCM，必要时重采样到 16 kHz，再按现有
 20 ms 帧协议提交。停止或取消时会释放原生录音器并删除临时文件。
@@ -69,8 +75,9 @@ cargo test --all-targets
 - `Windows quality gate`
 - `macOS quality gate`
 - `macOS application bundle`
+- `Windows installers`
 
-应在 GitHub 分支保护规则中将这三个检查设为 `main` 的必需状态检查。工作流
+应在 GitHub 分支保护规则中将这四个检查设为 `main` 的必需状态检查。工作流
 代码可以保证检查被创建，但分支保护仍需仓库管理员在 GitHub 设置中启用。
 
 生成本机架构的测试应用包：
@@ -79,6 +86,12 @@ cargo test --all-targets
 cd mindsurf-voice-ai
 npm run build:macos:debug
 ```
+
+系统浏览器登录回跳必须使用重新生成并启动过的 `.app` 验证。应用包的 `Info.plist` 声明
+`mindsurf` URL Scheme；macOS 在应用包启动后将其注册为 `mindsurf://` 的处理程序。浏览器授权页
+点击“登录并授权”时，应提示打开 MindSurf Voice AI。若没有提示，先完全退出旧进程，重新执行上述
+构建脚本并启动 `src-tauri/target/debug/bundle/macos/MindSurf Voice AI.app`。裸二进制或旧应用包
+不会获得新 Scheme 声明。
 
 不要使用 `tauri dev` 或未经 bundle 签名的裸二进制验证 TCC 权限。本地没有
 Apple Development 签名证书时，脚本会使用标识为 `org.sast.mindsurf` 的 ad-hoc
@@ -95,9 +108,10 @@ npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
 
 ## 签名与公证
 
-根目录 `.github/workflows/release-macos.yml` 会构建、签名、公证并创建草稿
-GitHub Release。tag 发布前会校验 tag、`tauri.conf.json`、`package.json` 和
-`Cargo.toml` 的版本一致；例如应用版本为 `0.1.0` 时只能使用 `v0.1.0` tag。
+根目录 `.github/workflows/release-desktop.yml` 会构建、签名、公证 macOS 产物，
+随后将签名后的 Windows 安装包追加到同一个草稿 GitHub Release。tag 发布前会
+校验 tag、`tauri.conf.json`、`package.json` 和 `Cargo.toml` 的版本一致；例如应用
+版本为 `0.2.0` 时只能使用 `v0.2.0` tag。
 仓库需要配置以下 Actions secrets：
 
 - `APPLE_CERTIFICATE`
@@ -107,7 +121,10 @@ GitHub Release。tag 发布前会校验 tag、`tauri.conf.json`、`package.json`
 - `APPLE_PASSWORD`
 - `APPLE_TEAM_ID`
 
+Windows 签名所需 Secrets 和发布步骤见 [Windows 说明](./WINDOWS.md)。
+
 发布前还应在常用编辑器、浏览器输入框、Terminal、Retina + 非 Retina 多显示器
 和全屏 Space 中手工验证快捷键、权限恢复、睡眠唤醒与服务重连，并分别使用
 500、2000、8000 code point 的中文、英文、emoji 和换行混合文本验证注入性能、
-目标切换中止及剩余文本保留。
+目标切换中止及剩余文本保留。还应分别启用和关闭登录自启动，注销并重新登录，
+确认启用时仅出现托盘图标、关闭时不会启动，并验证从托盘能够正常恢复主窗口。

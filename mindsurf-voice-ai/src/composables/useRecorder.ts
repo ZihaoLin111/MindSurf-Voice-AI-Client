@@ -3,7 +3,9 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import {
   describeRecorderError,
+  MICROPHONE_ACCESS_CHANGED_EVENT,
   MicrophoneRecorder,
+  observedMicrophonePermission,
   type RecordingResult,
 } from "../services/recorder";
 import { NativeMicrophoneRecorder } from "../services/nativeRecorder";
@@ -11,6 +13,7 @@ import {
   getSystemPermissionStatus,
   openMicrophonePermissionSettings,
 } from "../services/permissions";
+import { toast } from "../services/toast";
 
 export type MicrophonePermissionState =
   "unknown" | "prompt" | "granted" | "denied" | "unsupported";
@@ -31,7 +34,7 @@ const browserRecorder = new MicrophoneRecorder();
 let recorder: NativeMicrophoneRecorder | MicrophoneRecorder = isMacOSClient
   ? nativeRecorder
   : browserRecorder;
-const MAX_RECORDING_MS = 60_000;
+const DEFAULT_MAX_RECORDING_MS = 60_000;
 
 export function useRecorder() {
   const activeTrackCount = ref(0);
@@ -99,7 +102,7 @@ export function useRecorder() {
       const result = await navigator.permissions.query({
         name: "microphone" as PermissionName,
       });
-      permissionState.value = result.state;
+      permissionState.value = observedMicrophonePermission(result.state);
     } catch {
       permissionState.value = "prompt";
     }
@@ -119,10 +122,7 @@ export function useRecorder() {
       await recorder.start({
         onDuration: (value) => {
           durationMs.value = value;
-          const maxDurationMs = Math.min(
-            MAX_RECORDING_MS,
-            options.maxDurationMs ?? MAX_RECORDING_MS,
-          );
+          const maxDurationMs = options.maxDurationMs ?? DEFAULT_MAX_RECORDING_MS;
           if (value >= maxDurationMs && state.value === "recording") {
             if (options.onAutoStop) {
               options.onAutoStop();
@@ -158,6 +158,7 @@ export function useRecorder() {
         errorMessage.value = describeRecorderError(error);
       }
       state.value = "error";
+      toast.error(errorMessage.value, { title: "录音启动失败", durationMs: 0 });
       return false;
     }
   }
@@ -229,6 +230,7 @@ export function useRecorder() {
         errorMessage.value = describeRecorderError(error);
       }
       state.value = "error";
+      toast.error(errorMessage.value, { title: "麦克风准备失败", durationMs: 0 });
       return false;
     }
   }
@@ -253,6 +255,7 @@ export function useRecorder() {
       activeTrackCount.value = 0;
       errorMessage.value = describeRecorderError(error);
       state.value = "error";
+      toast.error(errorMessage.value, { title: "录音停止失败", durationMs: 0 });
       return null;
     }
   }
@@ -270,24 +273,38 @@ export function useRecorder() {
 
   function downloadLatestRecording() {
     if (!latestRecording.value) {
+      toast.warning("当前没有可导出的录音");
       return;
     }
 
-    const bytes = latestRecording.value.wavBytes.slice();
-    const url = URL.createObjectURL(new Blob([bytes.buffer], { type: "audio/wav" }));
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `mindsurf-recording-${new Date()
-      .toISOString()
-      .replace(/:/g, "-")}.wav`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    let url = "";
+    try {
+      const bytes = latestRecording.value.wavBytes.slice();
+      url = URL.createObjectURL(new Blob([bytes.buffer], { type: "audio/wav" }));
+      const filename = `mindsurf-recording-${new Date()
+        .toISOString()
+        .replace(/:/g, "-")}.wav`;
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      toast.success(`已发起导出：${filename}`, {
+        title: "WAV 导出成功",
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "无法导出 WAV 文件", {
+        title: "WAV 导出失败",
+      });
+    } finally {
+      if (url) globalThis.setTimeout(() => URL.revokeObjectURL(url), 0);
+    }
   }
 
   async function openPermissionSettings() {
     const result = await openMicrophonePermissionSettings();
     if (!result.ok) {
       errorMessage.value = result.error.message;
+      toast.error(errorMessage.value, { title: "无法打开麦克风设置", durationMs: 0 });
     }
   }
 
@@ -297,10 +314,12 @@ export function useRecorder() {
 
   onMounted(() => {
     globalThis.addEventListener("focus", handleWindowFocus);
+    globalThis.addEventListener(MICROPHONE_ACCESS_CHANGED_EVENT, handleWindowFocus);
   });
 
   onBeforeUnmount(() => {
     globalThis.removeEventListener("focus", handleWindowFocus);
+    globalThis.removeEventListener(MICROPHONE_ACCESS_CHANGED_EVENT, handleWindowFocus);
     operationId += 1;
     void Promise.all([nativeRecorder.dispose(), browserRecorder.dispose()]);
   });

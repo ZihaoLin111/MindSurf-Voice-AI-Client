@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 
 import { getNativeAudioRecordingMeter } from "./services/nativeRecorder";
 import { setLocale, useI18n } from "./services/i18n";
+import { applyInterfaceTheme } from "./services/theme";
 import {
   notifyOverlayReady,
   requestOverlayCancel,
@@ -15,13 +16,13 @@ import { VOICE_MODE_LABELS } from "./types/voice";
 const { t } = useI18n();
 
 const snapshot = reactive<OverlaySnapshot>({
-  assistantText: "",
   cancellable: false,
   duration: "00:00.0",
   durationMs: 0,
   level: 0,
   locale: "zh-CN",
-  mode: "dictation",
+  theme: "system",
+  mode: "asr_only",
   recording: false,
   status: "准备录音",
   transcript: "",
@@ -41,9 +42,7 @@ let levelPollTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
 let targetLevel = 0;
 let unlisten: (() => void) | null = null;
 
-const displayText = computed(
-  () => snapshot.assistantText || snapshot.transcript || t("正在等待语音输入…"),
-);
+const displayText = computed(() => snapshot.transcript || t("正在等待语音输入…"));
 const displayedDuration = computed(() => formatDuration(displayedDurationMs.value));
 const meterWidth = computed(() => `${Math.max(4, displayedLevel.value * 100)}%`);
 
@@ -59,6 +58,7 @@ function formatDuration(durationMs: number) {
 
 function updateLocalSnapshot(next: OverlaySnapshot) {
   setLocale(next.locale);
+  applyInterfaceTheme(next.theme);
   Object.assign(snapshot, next);
   if (!usesNativeMeter || !nativeRecordingActive.value) {
     const deliveryDelayMs = next.recording

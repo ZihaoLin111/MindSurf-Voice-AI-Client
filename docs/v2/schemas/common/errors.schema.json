@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mindsurf.dev/schemas/voice/v2/common/errors.schema.json",
+  "title": "MindSurf Voice v2 WebSocket errors",
+  "$defs": {
+    "code": {
+      "enum": [
+        "invalid_message",
+        "unsupported_message_type",
+        "protocol_version_mismatch",
+        "handshake_required",
+        "request_in_progress",
+        "request_not_found",
+        "request_id_reused",
+        "capabilities_stale",
+        "pipeline_unavailable",
+        "unsupported_mode",
+        "invalid_selection",
+        "quota_exhausted",
+        "rate_limit_exceeded",
+        "input_empty",
+        "input_idle_timeout",
+        "invalid_audio_frame",
+        "input_statistics_mismatch",
+        "recording_limit_exceeded",
+        "asr_failed",
+        "llm_failed",
+        "request_timeout",
+        "upstream_unavailable",
+        "session_revoked",
+        "server_error"
+      ]
+    },
+    "stage": {
+      "enum": ["protocol", "authorization", "quota", "routing", "request", "input", "asr", "llm", "internal"]
+    },
+    "errorPayload": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["code", "message", "stage", "terminal", "retryable", "fatal", "details"],
+      "properties": {
+        "code": { "$ref": "#/$defs/code" },
+        "message": { "type": "string", "minLength": 1 },
+        "stage": { "$ref": "#/$defs/stage" },
+        "terminal": { "type": "boolean" },
+        "retryable": { "type": "boolean" },
+        "fatal": { "type": "boolean" },
+        "details": { "type": "object", "additionalProperties": true },
+        "usage": { "$ref": "request.schema.json#/$defs/usage" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "invalid_message",
+                  "unsupported_message_type",
+                  "protocol_version_mismatch",
+                  "handshake_required",
+                  "invalid_audio_frame"
+                ]
+              }
+            },
+            "required": ["code"]
+          },
+          "then": { "properties": { "stage": { "const": "protocol" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": ["request_in_progress", "request_not_found", "request_id_reused", "request_timeout"]
+              }
+            },
+            "required": ["code"]
+          },
+          "then": { "properties": { "stage": { "const": "request" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "capabilities_stale",
+                  "pipeline_unavailable",
+                  "unsupported_mode",
+                  "invalid_selection",
+                  "upstream_unavailable"
+                ]
+              }
+            },
+            "required": ["code"]
+          },
+          "then": { "properties": { "stage": { "const": "routing" } } }
+        },
+        {
+          "if": {
+            "properties": { "code": { "enum": ["quota_exhausted", "rate_limit_exceeded"] } },
+            "required": ["code"]
+          },
+          "then": { "properties": { "stage": { "const": "quota" } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "input_empty",
+                  "input_idle_timeout",
+                  "input_statistics_mismatch",
+                  "recording_limit_exceeded"
+                ]
+              }
+            },
+            "required": ["code"]
+          },
+          "then": { "properties": { "stage": { "const": "input" } } }
+        },
+        {
+          "if": { "properties": { "code": { "const": "asr_failed" } }, "required": ["code"] },
+          "then": { "properties": { "stage": { "const": "asr" } } }
+        },
+        {
+          "if": { "properties": { "code": { "const": "llm_failed" } }, "required": ["code"] },
+          "then": { "properties": { "stage": { "const": "llm" } } }
+        },
+        {
+          "if": { "properties": { "code": { "const": "server_error" } }, "required": ["code"] },
+          "then": { "properties": { "stage": { "const": "internal" } } }
+        },
+        {
+          "if": { "properties": { "code": { "const": "session_revoked" } }, "required": ["code"] },
+          "then": {
+            "properties": {
+              "stage": { "const": "authorization" },
+              "terminal": { "const": false },
+              "retryable": { "const": false },
+              "fatal": { "const": true }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "code": { "const": "rate_limit_exceeded" } }, "required": ["code"] },
+          "then": {
+            "properties": {
+              "details": {
+                "required": ["retry_after_ms"],
+                "properties": { "retry_after_ms": { "type": "integer", "minimum": 1 } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "code": { "const": "invalid_selection" } }, "required": ["code"] },
+          "then": {
+            "properties": {
+              "details": {
+                "required": ["field"],
+                "properties": { "field": { "type": "string", "minLength": 1 } }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "format_version": 2,
+  "protocol_version": 2,
+  "sources": {
+    "openapi": "../openapi/openapi.yaml",
+    "client_schema": "../schemas/client-messages.schema.json",
+    "server_schema": "../schemas/server-messages.schema.json",
+    "ws_document": "../docs/WS_PROTOCOL_V2.md"
+  },
+  "required_client_message_types": [
+    "client.hello",
+    "session.pong",
+    "request.start",
+    "input.commit",
+    "request.cancel"
+  ],
+  "required_server_message_types": [
+    "server.hello",
+    "session.ping",
+    "request.accepted",
+    "input.committed",
+    "output.text.delta",
+    "output.text.snapshot",
+    "request.done",
+    "request.cancelled",
+    "error"
+  ],
+  "vectors": {
+    "invalid_json": "json/invalid-messages.json",
+    "browser_authorization": "json/browser-authorization.json",
+    "auth_idempotency": "json/auth-idempotency.json",
+    "session_parameters": "json/session-parameters.json",
+    "mode_pipeline_requests": "json/mode-pipeline-requests.json",
+    "billing_usage": "json/billing-usage.json",
+    "request_lifecycles": "json/request-lifecycles.json",
+    "binary_audio": "binary/audio-frames.json"
+  }
+}

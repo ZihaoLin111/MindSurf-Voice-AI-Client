@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mindsurf.dev/schemas/voice/v2/common/request.schema.json",
+  "title": "MindSurf Voice v2 shared request structures",
+  "$defs": {
+    "mode": { "enum": ["asr_only", "asr_llm"] },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asr", "llm"],
+      "properties": {
+        "asr": { "type": "string", "minLength": 1 },
+        "llm": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": { "type": ["number", "integer"] }
+    },
+    "inputStatistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["last_sequence", "chunk_count", "sample_count", "duration_ms"],
+      "properties": {
+        "last_sequence": { "type": "integer", "minimum": 0 },
+        "chunk_count": { "type": "integer", "minimum": 1 },
+        "sample_count": { "type": "integer", "minimum": 1 },
+        "duration_ms": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_audio_ms",
+        "llm_input_tokens",
+        "llm_output_tokens",
+        "asr_credits_charged",
+        "llm_credits_charged",
+        "credits_charged"
+      ],
+      "properties": {
+        "input_audio_ms": { "type": "integer", "minimum": 0 },
+        "llm_input_tokens": { "type": "integer", "minimum": 0 },
+        "llm_output_tokens": { "type": "integer", "minimum": 0 },
+        "asr_credits_charged": { "type": "integer", "minimum": 0 },
+        "llm_credits_charged": { "type": "integer", "minimum": 0 },
+        "credits_charged": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "creditBreakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asr_credits", "llm_credits", "credits"],
+      "properties": {
+        "asr_credits": { "type": "integer", "minimum": 0 },
+        "llm_credits": { "type": "integer", "minimum": 0 },
+        "credits": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
