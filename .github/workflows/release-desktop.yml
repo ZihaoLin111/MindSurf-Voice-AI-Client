@@ -24,7 +24,7 @@ jobs:
           node-version: 22
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Validate release version
         working-directory: mindsurf-voice-ai
@@ -61,7 +61,7 @@ jobs:
           cache-dependency-path: mindsurf-voice-ai/package-lock.json
 
       - name: Set up universal Rust targets
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
@@ -104,7 +104,7 @@ jobs:
           cache-dependency-path: mindsurf-voice-ai/package-lock.json
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Install frontend dependencies
         working-directory: mindsurf-voice-ai

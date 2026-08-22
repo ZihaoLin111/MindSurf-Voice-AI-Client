@@ -102,8 +102,8 @@ fn parse_pcm_wav(bytes: &[u8]) -> Result<(u32, Vec<i16>), AppError> {
             format = Some((audio_format, channels, sample_rate, bits_per_sample));
         } else if chunk_id == b"data" {
             let mut pcm = Vec::with_capacity(chunk_len / 2);
-            for pair in bytes[chunk_start..chunk_end].chunks_exact(2) {
-                pcm.push(i16::from_le_bytes([pair[0], pair[1]]));
+            for pair in bytes[chunk_start..chunk_end].as_chunks::<2>().0 {
+                pcm.push(i16::from_le_bytes(*pair));
             }
             samples = Some(pcm);
         }
