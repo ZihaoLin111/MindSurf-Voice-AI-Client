@@ -99,29 +99,26 @@ Apple Development 签名证书时，脚本会使用标识为 `org.sast.mindsurf`
 `tccutil reset All org.sast.mindsurf`，重新打开同一个 `.app` 并授权。红色关闭按钮
 只会隐藏主窗口，必须使用托盘菜单“退出”或确认进程已经结束。
 
-生成 Universal App 与 DMG：
+生成 ad-hoc 签名的 Universal DMG：
 
 ```bash
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
-npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
+APPLE_SIGNING_IDENTITY=- npm run tauri build -- --target universal-apple-darwin --bundles dmg
 ```
 
-## 签名与公证
+## GitHub Release
 
-根目录 `.github/workflows/release-desktop.yml` 会构建、签名、公证 macOS 产物，
-随后将签名后的 Windows 安装包追加到同一个草稿 GitHub Release。tag 发布前会
-校验 tag、`tauri.conf.json`、`package.json` 和 `Cargo.toml` 的版本一致；例如应用
-版本为 `0.2.0` 时只能使用 `v0.2.0` tag。
-仓库需要配置以下 Actions secrets：
+根目录 `.github/workflows/release-desktop.yml` 使用 Tauri 的 `-` 伪身份进行 ad-hoc
+签名，构建 Universal macOS DMG，不需要 Apple Developer 证书，也不会执行 Apple
+公证。随后会将未签名的 Windows NSIS 安装包追加到同一个草稿 GitHub Release。
+tag 发布前会校验 tag、`tauri.conf.json`、`package.json` 和 `Cargo.toml` 的版本一致；
+例如应用版本为 `0.2.0` 时只能使用 `v0.2.0` tag。
 
-- `APPLE_CERTIFICATE`
-- `APPLE_CERTIFICATE_PASSWORD`
-- `APPLE_SIGNING_IDENTITY`
-- `APPLE_ID`
-- `APPLE_PASSWORD`
-- `APPLE_TEAM_ID`
+ad-hoc 签名不能消除 Gatekeeper 警告。用户首次启动时可能需要在 Finder 中右键选择
+“打开”，或者前往“系统设置 → 隐私与安全性”确认“仍要打开”。每次发布的代码哈希
+也会变化，系统权限异常时需要重新授权。
 
-Windows 签名所需 Secrets 和发布步骤见 [Windows 说明](./WINDOWS.md)。
+Windows 安装步骤见 [Windows 说明](./WINDOWS.md)。
 
 发布前还应在常用编辑器、浏览器输入框、Terminal、Retina + 非 Retina 多显示器
 和全屏 Space 中手工验证快捷键、权限恢复、睡眠唤醒与服务重连，并分别使用

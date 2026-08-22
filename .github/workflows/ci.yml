@@ -132,5 +132,5 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build unsigned test installers
-        run: npm run tauri build -- --debug --bundles nsis,msi
+      - name: Build unsigned test installer
+        run: npm run tauri build -- --debug --bundles nsis

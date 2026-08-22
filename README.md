@@ -129,25 +129,24 @@ cd mindsurf-voice-ai
 npm run tauri build -- --debug --bundles app --no-sign
 ```
 
-Windows NSIS/MSI：
+Windows NSIS：
 
 ```powershell
 cd mindsurf-voice-ai
-npm run tauri build -- --bundles nsis,msi
+npm run tauri build -- --bundles nsis
 ```
 
-正式版本由 `.github/workflows/release-desktop.yml` 构建：macOS Universal App/DMG 和 Windows x64 NSIS/MSI 会进入同一个 Draft Release。普通安装包发布后可从 [GitHub Releases](https://github.com/wyywnab/MindSurf-Voice-AI-Client/releases) 下载。
+正式版本由 `.github/workflows/release-desktop.yml` 构建：ad-hoc 签名的 macOS Universal DMG 和未签名的 Windows x64 NSIS 安装包会进入同一个 Draft Release，不需要配置平台签名证书。发布后可从 [GitHub Releases](https://github.com/wyywnab/MindSurf-Voice-AI-Client/releases) 下载。
 
-- [macOS 构建、签名和发布](./docs/MACOS.md)
-- [Windows 构建、签名和发布](./docs/WINDOWS.md)
+- [macOS 构建和发布](./docs/MACOS.md)
+- [Windows 构建和发布](./docs/WINDOWS.md)
 - [交付状态与人工验收](./docs/DELIVERY.md)
 
 ## 常见问题
 
 - 连接失败：确认 Mock 仍在运行，客户端 origin 与 Mock 端口一致；
 - macOS 浏览器无法回跳：重新执行 `npm run build:macos:debug` 并启动生成的 `.app`；
-- Windows 编译失败：确认已安装 C++ 桌面开发工具；MSI 的 `light.exe` 错误通常需要
-  启用 Windows VBSCRIPT 可选功能；
+- Windows 编译失败：确认已安装 C++ 桌面开发工具；
 - 麦克风、快捷键或注入不可用：先在客户端“系统权限”页检查，再查看开发者诊断页；
 - 需要复现协议异常：使用 Mock 的 `--fault`、`--fault-delay-ms` 或对应环境变量。
 
@@ -160,7 +159,7 @@ scripts/                 协议与仓库级校验脚本
 docs/v2/                 冻结协议、OpenAPI、Schema 和测试向量
 docs/DELIVERY.md         交付状态与人工验收项
 docs/MACOS.md            macOS 权限、构建和发布
-docs/WINDOWS.md          Windows 构建、签名和发布
+docs/WINDOWS.md          Windows 构建和发布
 ```
 
 客户端内部模块说明见 [mindsurf-voice-ai/README.md](./mindsurf-voice-ai/README.md)。
