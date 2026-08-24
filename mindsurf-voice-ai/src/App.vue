@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import ConnectionBadge from "./components/ConnectionBadge.vue";
 import ConnectionPanel from "./components/ConnectionPanel.vue";
 import HistoryPanel from "./components/HistoryPanel.vue";
 import LoginPanel from "./components/LoginPanel.vue";
 import PermissionsPanel from "./components/PermissionsPanel.vue";
+import PolishPromptPanel from "./components/PolishPromptPanel.vue";
 import RecorderPanel from "./components/RecorderPanel.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import UsagePanel from "./components/UsagePanel.vue";
@@ -32,7 +33,7 @@ import { useRealtimeConnectionStore } from "./stores/realtimeConnectionStore";
 import { useRequestStore } from "./stores/requestStore";
 import { diagnosticsStoreActions } from "./stores/diagnosticsStore";
 import { useSettingsStore } from "./stores/settingsStore";
-import { toast } from "./services/toast";
+import { dismissToast, toast } from "./services/toast";
 import type { AppInfo } from "./types/app";
 import type { MainTab, MainTabId } from "./types/navigation";
 import type { SystemPermission } from "./types/permissions";
@@ -44,7 +45,13 @@ const appInfo = ref<AppInfo | null>(null);
 const appInfoError = ref("");
 const auth = useAuthStore();
 const account = useAccountStore();
+const accountAnchor = ref<InstanceType<typeof globalThis.HTMLElement> | null>(null);
+const accountMenu = ref<InstanceType<typeof globalThis.HTMLElement> | null>(null);
 const accountMenuOpen = ref(false);
+const accountTrigger = ref<InstanceType<typeof globalThis.HTMLButtonElement> | null>(
+  null,
+);
+const accountPromptOpen = ref(false);
 const accountUsageOpen = ref(false);
 const permissionsReturnTab = ref<"record" | "settings">("settings");
 const realtimeConnection = useRealtimeConnectionStore();
@@ -78,6 +85,8 @@ const visibleActiveTab = computed<MainTabId>(() =>
 );
 let trayDisposed = false;
 let unlistenTray: (() => void) | null = null;
+let cancellationToastId: number | null = null;
+let permissionToastId: number | null = null;
 
 watch(diagnosticsPageVisible, (visible) => {
   if (!visible && activeTab.value === "connection") {
@@ -110,7 +119,7 @@ watch(
         durationMs: 0,
       });
     } else if (status === "cancelled") {
-      toast.info("当前录音和语音请求已取消");
+      cancellationToastId = toast.info("当前录音和语音请求已取消");
     }
   },
 );
@@ -166,13 +175,35 @@ watch(
 function navigateTo(page: MainTabId) {
   if (page === "connection" && !diagnosticsPageVisible.value) return;
   accountUsageOpen.value = false;
+  accountPromptOpen.value = false;
   activeTab.value = page;
 }
 
 function openPermissions(returnTab: "record" | "settings") {
+  if (permissionToastId !== null) {
+    dismissToast(permissionToastId);
+    permissionToastId = null;
+  }
   accountUsageOpen.value = false;
   permissionsReturnTab.value = returnTab;
   activeTab.value = "permissions";
+}
+
+function showPermissionGuidance() {
+  if (cancellationToastId !== null) {
+    dismissToast(cancellationToastId);
+    cancellationToastId = null;
+  }
+  if (permissionToastId !== null) dismissToast(permissionToastId);
+  permissionToastId = toast.warning(
+    "录音需要麦克风权限，自动注入还需要辅助功能权限。",
+    {
+      title: "尚未完成系统授权",
+      actionLabel: "去授权",
+      durationMs: 0,
+      onAction: () => openPermissions("record"),
+    },
+  );
 }
 
 function retryRealtimeConnection() {
@@ -180,9 +211,75 @@ function retryRealtimeConnection() {
   void realtimeConnectionController.retryNow();
 }
 
+function handleAccountMenuPointerDown(
+  event: InstanceType<typeof globalThis.PointerEvent>,
+) {
+  if (
+    accountMenuOpen.value &&
+    event.target instanceof globalThis.Node &&
+    !accountAnchor.value?.contains(event.target)
+  ) {
+    accountMenuOpen.value = false;
+  }
+}
+
+function handleAccountMenuKeydown(
+  event: InstanceType<typeof globalThis.KeyboardEvent>,
+) {
+  if (event.key !== "Escape" || !accountMenuOpen.value) return;
+  accountMenuOpen.value = false;
+  accountTrigger.value?.focus();
+}
+
+async function handleAccountTriggerKeydown(
+  event: InstanceType<typeof globalThis.KeyboardEvent>,
+) {
+  if (event.key !== "ArrowDown") return;
+  event.preventDefault();
+  accountMenuOpen.value = true;
+  await nextTick();
+  accountMenu.value
+    ?.querySelector<InstanceType<typeof globalThis.HTMLButtonElement>>(
+      "[role='menuitem']",
+    )
+    ?.focus();
+}
+
+function handleAccountMenuNavigation(
+  event: InstanceType<typeof globalThis.KeyboardEvent>,
+) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const items = [
+    ...(accountMenu.value?.querySelectorAll<
+      InstanceType<typeof globalThis.HTMLButtonElement>
+    >("[role='menuitem']:not(:disabled)") ?? []),
+  ];
+  if (!items.length) return;
+  event.preventDefault();
+  const current = items.indexOf(
+    globalThis.document.activeElement as InstanceType<
+      typeof globalThis.HTMLButtonElement
+    >,
+  );
+  const index =
+    event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? items.length - 1
+        : event.key === "ArrowUp"
+          ? current <= 0
+            ? items.length - 1
+            : current - 1
+          : current < 0 || current === items.length - 1
+            ? 0
+            : current + 1;
+  items[index]?.focus();
+}
+
 async function logout() {
   accountMenuOpen.value = false;
   accountUsageOpen.value = false;
+  accountPromptOpen.value = false;
   activeTab.value = "record";
   await authController.logout();
 }
@@ -236,6 +333,8 @@ async function configureStartupPermissions(platform: string) {
 }
 
 onMounted(async () => {
+  globalThis.document.addEventListener("pointerdown", handleAccountMenuPointerDown);
+  globalThis.document.addEventListener("keydown", handleAccountMenuKeydown);
   await settingsController.initialize();
   void subscribeTrayActions({
     onMode: (mode) => {
@@ -283,6 +382,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  globalThis.document.removeEventListener("pointerdown", handleAccountMenuPointerDown);
+  globalThis.document.removeEventListener("keydown", handleAccountMenuKeydown);
   trayDisposed = true;
   unlistenTray?.();
   unlistenTray = null;
@@ -295,13 +396,17 @@ onBeforeUnmount(() => {
     <SystemDialogHost />
     <ToastHost />
     <header class="app-header">
-      <div class="account-anchor">
+      <div ref="accountAnchor" class="account-anchor">
         <button
+          ref="accountTrigger"
           class="account-trigger"
+          :class="{ 'is-open': accountMenuOpen }"
           type="button"
           :aria-expanded="accountMenuOpen"
+          :aria-controls="accountMenuOpen ? 'account-menu' : undefined"
           aria-haspopup="menu"
           @click="accountMenuOpen = !accountMenuOpen"
+          @keydown="handleAccountTriggerKeydown"
         >
           <span class="user-avatar" aria-hidden="true">
             <svg viewBox="0 0 24 24">
@@ -313,33 +418,106 @@ onBeforeUnmount(() => {
           <strong>{{ account.state.user?.display_name ?? "未登录" }}</strong>
           <span class="account-chevron" aria-hidden="true">⌄</span>
         </button>
-        <div v-if="accountMenuOpen" class="account-menu" role="menu">
+        <div
+          v-if="accountMenuOpen"
+          id="account-menu"
+          ref="accountMenu"
+          class="account-menu"
+          role="menu"
+          aria-label="账户菜单"
+          @keydown="handleAccountMenuNavigation"
+        >
           <template v-if="account.state.user">
-            <strong>{{ account.state.user.display_name }}</strong>
-            <span>{{ account.state.user.login }}</span>
-            <span>{{ account.state.user.plan }}</span>
+            <div class="account-menu-profile" role="presentation">
+              <span class="account-menu-avatar" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path
+                    d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8c.48-3.7 3.12-5.75 7-5.75s6.52 2.05 7 5.75"
+                  />
+                </svg>
+              </span>
+              <span class="account-menu-identity">
+                <strong>{{ account.state.user.display_name }}</strong>
+                <small>{{ account.state.user.login }}</small>
+              </span>
+              <span class="account-plan">{{ account.state.user.plan }}</span>
+            </div>
+            <div class="account-menu-separator" role="separator"></div>
+            <div class="account-menu-group" role="presentation">
+              <button
+                class="account-menu-item"
+                type="button"
+                role="menuitem"
+                @click="
+                  accountMenuOpen = false;
+                  accountPromptOpen = false;
+                  accountUsageOpen = true;
+                "
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 19V9m7 10V5m7 14v-7" />
+                </svg>
+                <span class="account-menu-copy">
+                  <strong>用量与额度</strong>
+                  <small>查看当前周期的账户用量</small>
+                </span>
+              </button>
+              <button
+                class="account-menu-item"
+                type="button"
+                role="menuitem"
+                @click="
+                  accountMenuOpen = false;
+                  accountUsageOpen = false;
+                  accountPromptOpen = true;
+                "
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="m4 20 4.2-1 10.9-10.9a2.1 2.1 0 0 0-3-3L5.2 16 4 20Zm10.6-13.4 3 3M12 3h.01M20 14h.01M6 8h.01"
+                  />
+                </svg>
+                <span class="account-menu-copy">
+                  <strong>润色提示词</strong>
+                  <small>管理跨设备同步的账户指令</small>
+                </span>
+              </button>
+            </div>
+            <div class="account-menu-separator" role="separator"></div>
             <button
-              type="button"
-              role="menuitem"
-              @click="
-                accountMenuOpen = false;
-                accountUsageOpen = true;
-              "
-            >
-              用量与额度
-            </button>
-            <button
+              class="account-menu-item account-menu-item-danger"
               type="button"
               role="menuitem"
               :disabled="auth.state.status === 'signing_out'"
               @click="logout"
             >
-              {{ auth.state.status === "signing_out" ? "正在退出…" : "退出登录" }}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M10 5H5v14h5m4-4 4-3-4-3m4 3H9" />
+              </svg>
+              <span class="account-menu-copy">
+                <strong>{{
+                  auth.state.status === "signing_out" ? "正在退出…" : "退出登录"
+                }}</strong>
+              </span>
             </button>
           </template>
           <template v-else>
-            <span>尚未登录 MindSurf</span>
+            <div class="account-menu-profile account-menu-profile-signed-out">
+              <span class="account-menu-avatar" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path
+                    d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8c.48-3.7 3.12-5.75 7-5.75s6.52 2.05 7 5.75"
+                  />
+                </svg>
+              </span>
+              <span class="account-menu-identity">
+                <strong>尚未登录</strong>
+                <small>登录后使用账户功能</small>
+              </span>
+            </div>
+            <div class="account-menu-separator" role="separator"></div>
             <button
+              class="account-menu-item"
               type="button"
               role="menuitem"
               @click="
@@ -347,7 +525,13 @@ onBeforeUnmount(() => {
                 activeTab = 'record';
               "
             >
-              前往登录
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 5h5v14h-5m-4-4-4-3 4-3m-4 3h9" />
+              </svg>
+              <span class="account-menu-copy">
+                <strong>前往登录</strong>
+                <small>连接 MindSurf 账户</small>
+              </span>
             </button>
           </template>
         </div>
@@ -371,10 +555,15 @@ onBeforeUnmount(() => {
         v-if="accountUsageOpen && account.state.user"
         @close="accountUsageOpen = false"
       />
+      <PolishPromptPanel
+        v-else-if="accountPromptOpen && account.state.user"
+        @close="accountPromptOpen = false"
+      />
       <LoginPanel v-else-if="activeTab === 'record' && !account.state.user" />
       <RecorderPanel
         v-else-if="activeTab === 'record'"
         @open-permissions="openPermissions('record')"
+        @permission-required="showPermissionGuidance"
       />
       <ConnectionPanel
         v-else-if="diagnosticsPageVisible && activeTab === 'connection'"
@@ -390,6 +579,10 @@ onBeforeUnmount(() => {
         :app-info="appInfo"
         :app-info-error="appInfoError"
         @open-permissions="openPermissions('settings')"
+        @open-polish-prompt="
+          accountUsageOpen = false;
+          accountPromptOpen = true;
+        "
       />
     </main>
 

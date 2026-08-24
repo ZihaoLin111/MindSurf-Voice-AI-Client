@@ -5,6 +5,7 @@ import { authStoreActions } from "../stores/authStore";
 import { capabilitiesStoreActions } from "../stores/capabilitiesStore";
 import { quotaStoreActions } from "../stores/quotaStore";
 import { historyStoreActions } from "../stores/historyStore";
+import { polishPromptStoreActions } from "../stores/polishPromptStore";
 import { settingsStoreActions, useSettingsStore } from "../stores/settingsStore";
 import { diagnosticsStoreActions } from "../stores/diagnosticsStore";
 import { getOrCreateDeviceId } from "../services/auth/deviceIdentity";
@@ -81,25 +82,50 @@ export class AuthController {
   }
 
   async listUsage(fromMs: number, toMs: number) {
-    const { api, tokens } = this.requireConfigured();
-    if (!tokens.hasUsableAccessToken()) {
-      const restored = await tokens.refresh();
-      if (!restored) throw new ReauthenticationRequiredError("登录已过期，请重新登录");
-    }
+    const api = await this.requireAuthenticatedApi();
     return api.listAllUsage({ fromMs, toMs, limit: 100 });
+  }
+
+  async getPolishPrompt() {
+    const api = await this.requireAuthenticatedApi();
+    return api.getPolishPrompt();
+  }
+
+  async setPolishPrompt(prompt: string, etag: string) {
+    const api = await this.requireAuthenticatedApi();
+    const idempotencyKey = globalThis.crypto.randomUUID();
+    return retryUncertain(
+      () => api.setPolishPrompt(prompt, etag, idempotencyKey),
+      TOKEN_RECOVERY_WINDOW_MS,
+    );
+  }
+
+  async resetPolishPrompt(etag: string) {
+    const api = await this.requireAuthenticatedApi();
+    const idempotencyKey = globalThis.crypto.randomUUID();
+    return retryUncertain(
+      () => api.resetPolishPrompt(etag, idempotencyKey),
+      TOKEN_RECOVERY_WINDOW_MS,
+    );
   }
 
   private async performAccountRefresh() {
     const { api, tokens } = this.requireConfigured();
     if (!tokens.hasUsableAccessToken()) {
-      authStoreActions.setStatus("restoring");
-      const restored = await tokens.refresh();
-      if (!restored) {
-        authStoreActions.setStatus("signed_out", "请先登录");
-        return;
+      try {
+        const restored = await tokens.refresh();
+        if (!restored) {
+          throw new ReauthenticationRequiredError("请先登录");
+        }
+      } catch (error) {
+        if (error instanceof ReauthenticationRequiredError) {
+          this.clearAccountState();
+          authStoreActions.setStatus("signed_out", error.message);
+        }
+        throw error;
       }
     }
-    await this.loadAccountData(api);
+    await this.loadAccountData(api, false);
   }
 
   async logout() {
@@ -307,8 +333,8 @@ export class AuthController {
     }
   }
 
-  private async loadAccountData(api: VoiceApiClient) {
-    authStoreActions.setStatus("loading_account");
+  private async loadAccountData(api: VoiceApiClient, authenticationTransition = true) {
+    if (authenticationTransition) authStoreActions.setStatus("loading_account");
     diagnosticsStoreActions.log(
       "info",
       "auth",
@@ -331,7 +357,7 @@ export class AuthController {
           "保存的请求模式已不可用，请确认新的模式选择",
         );
       }
-      authStoreActions.setStatus("authenticated");
+      if (authenticationTransition) authStoreActions.setStatus("authenticated");
       diagnosticsStoreActions.log(
         "info",
         "auth",
@@ -342,7 +368,7 @@ export class AuthController {
       const message = describeError(error);
       quotaStoreActions.setError(message);
       capabilitiesStoreActions.invalidate(message);
-      authStoreActions.setStatus("error", message);
+      if (authenticationTransition) authStoreActions.setStatus("error", message);
       throw error;
     }
   }
@@ -388,6 +414,7 @@ export class AuthController {
 
   private clearAccountState() {
     historyStoreActions.reset();
+    polishPromptStoreActions.reset();
     accountStoreActions.setUser(null);
     quotaStoreActions.setQuota(null);
     capabilitiesStoreActions.setCapabilities(null);
@@ -403,6 +430,17 @@ export class AuthController {
     if (!this.api || !this.tokens || !this.appInfo)
       throw new Error("认证服务尚未初始化");
     return { api: this.api, tokens: this.tokens };
+  }
+
+  private async requireAuthenticatedApi() {
+    const { api, tokens } = this.requireConfigured();
+    if (!tokens.hasUsableAccessToken()) {
+      const restored = await tokens.refresh();
+      if (!restored) {
+        throw new ReauthenticationRequiredError("登录已过期，请重新登录");
+      }
+    }
+    return api;
   }
 }
 
